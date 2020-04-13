@@ -41,6 +41,8 @@ link_user = []
 run_cmdline = []
 # Add performance profiling
 profile = []
+# Rcore Virtual machine
+rvm = []
 
 [profile.dev]
 # MUST >= 2 : Enable RVO to avoid stack overflow

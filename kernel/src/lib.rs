@@ -39,6 +39,8 @@ pub mod lkm;
 pub mod memory;
 pub mod net;
 pub mod process;
+#[cfg(feature = "rvm")]
+pub mod rvm;
 pub mod shell;
 pub mod sync;
 pub mod syscall;

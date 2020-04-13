@@ -29,6 +29,7 @@
 #   INIT = /bin/ls              [riscv64 only] Run specified program instead of user shell
 #   EXTRA_NIC = on | off        [ x86_64 only] Add an additional e1000 nic
 #   FEATURES = profile | ...    Add additional features
+#   RVM = on | off     			[x86_64 only] Enable/disable Rcore Virtual Machine
 
 ARCH ?= riscv64
 MODE ?= release
@@ -38,6 +39,7 @@ SMP  ?= 4
 PCI_PASSTHRU ?=
 INIT ?=
 EXTRA_NIC ?= off
+RVM ?= on
 
 qemu := qemu-system-$(ARCH)
 target := $(ARCH)
@@ -181,6 +183,17 @@ endif
 ifeq ($(NET), on)
 qemu_opts += $(qemu_net_opts)
 qemu := sudo $(qemu)
+else
+qemu_opts += -net none
+endif
+
+ifeq ($(RVM), on)
+FEATURES += rvm
+ifeq ($(ARCH), x86_64)
+ifeq ($(shell uname), Linux)
+qemu_opts += -enable-kvm -cpu host,+vmx
+endif
+endif
 endif
 
 ### build args ###
