@@ -89,7 +89,7 @@ lazy_static! {
         devfs.add("fb0", Arc::new(Fbdev::default())).expect("failed to mknod /dev/fb0");
 
         #[cfg(feature = "rvm")]
-        devfs.add("rvm", Arc::new(devfs::RvmINode::default())).expect("failed to mknod /dev/rvm");
+        devfs.add("rvm", Arc::new(crate::rvm::RvmINode::new())).expect("failed to mknod /dev/rvm");
 
         // mount DevFS at /dev
         let dev = root.find(true, "dev").unwrap_or_else(|_| {

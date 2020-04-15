@@ -39,7 +39,7 @@ SMP  ?= 4
 PCI_PASSTHRU ?=
 INIT ?=
 EXTRA_NIC ?= off
-RVM ?= on
+RVM ?= off
 
 qemu := qemu-system-$(ARCH)
 target := $(ARCH)
@@ -83,6 +83,7 @@ qemu_opts := \
 qemu_net_opts :=
 
 ifeq ($(ARCH), x86_64)
+RVM := on
 qemu_opts += \
 	-bios $(OVMF) \
 	-drive format=raw,file=fat:rw:$(ESP) \
