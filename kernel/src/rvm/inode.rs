@@ -51,12 +51,12 @@ impl INode for RvmINode {
         })
     }
     fn io_control(&self, cmd: u32, data: usize) -> Result<usize> {
-        info!("RVM: ioctl {:?} {:?}", cmd, data);
+        info!("RVM: ioctl {:#x} {:#x}", cmd, data);
         match cmd {
             RVM_GUEST_CREATE => {
                 let phsy_mem_size = data;
                 if arch::check_hypervisor_feature() {
-                    let guest = Guest::new(phsy_mem_size);
+                    let guest = Guest::new(phsy_mem_size)?;
                     let vmid = self.add_guest(guest);
                     Ok(vmid)
                 } else {
@@ -90,7 +90,7 @@ impl INode for RvmINode {
         }
     }
     fn mmap(&self, area: MMapArea) -> Result<()> {
-        info!("RVM: mmap [{:?}, {:?})", area.start_vaddr, area.end_vaddr);
+        info!("RVM: mmap {:#x?}", area);
         Err(FsError::NotSupported)
     }
     fn as_any_ref(&self) -> &dyn Any {

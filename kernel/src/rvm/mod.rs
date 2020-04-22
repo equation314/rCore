@@ -5,4 +5,7 @@
 mod arch;
 mod inode;
 
+type RvmError = rcore_fs::vfs::FsError;
+type RvmResult<T> = rcore_fs::vfs::Result<T>;
+
 pub use inode::RvmINode;

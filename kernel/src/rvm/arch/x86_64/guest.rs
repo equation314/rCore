@@ -1,11 +1,21 @@
+use super::vmx_state::VMX_STATE;
+use crate::rvm::RvmResult;
+
 pub struct Guest {
     _phsy_mem_size: usize,
 }
 
 impl Guest {
-    pub fn new(phsy_mem_size: usize) -> Self {
-        Self {
+    pub fn new(phsy_mem_size: usize) -> RvmResult<Self> {
+        VMX_STATE.lock().alloc()?;
+        Ok(Self {
             _phsy_mem_size: phsy_mem_size,
-        }
+        })
+    }
+}
+
+impl Drop for Guest {
+    fn drop(&mut self) {
+        VMX_STATE.lock().free();
     }
 }

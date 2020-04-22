@@ -1,7 +1,9 @@
 use raw_cpuid::CpuId;
 
 mod guest;
+mod msr;
 mod vcpu;
+mod vmx_state;
 
 pub use guest::Guest;
 pub use vcpu::Vcpu;
