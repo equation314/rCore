@@ -51,16 +51,16 @@ impl Drop for VmxPage {
 
 /// Global VMX states used for all guests.
 #[derive(Default)]
-pub struct VmxState {
+pub struct VmmState {
     num_guests: usize,
     vmxon_pages: Vec<VmxPage>,
 }
 
 lazy_static! {
-    pub static ref VMX_STATE: Mutex<VmxState> = Mutex::new(VmxState::default());
+    pub static ref VMM_STATE: Mutex<VmmState> = Mutex::new(VmmState::default());
 }
 
-impl VmxState {
+impl VmmState {
     pub fn alloc(&mut self) -> RvmResult<()> {
         if self.num_guests == 0 {
             // TODO: support multiple cpu
