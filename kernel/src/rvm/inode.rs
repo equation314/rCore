@@ -7,6 +7,10 @@ use spin::RwLock;
 use rcore_fs::vfs::*;
 
 use super::arch::{self, Guest, Vcpu};
+use crate::memory::copy_from_user;
+
+const MAX_GUEST_NUM: usize = 64;
+const MAX_VCPU_NUM: usize = 64;
 
 const RVM_IO: u32 = 0xAE00;
 const RVM_GUEST_CREATE: u32 = RVM_IO + 0x01;
@@ -16,6 +20,13 @@ const RVM_VCPU_RESUME: u32 = RVM_IO + 0x12;
 pub struct RvmINode {
     guests: RwLock<BTreeMap<usize, Arc<RwLock<Guest>>>>,
     vcpus: RwLock<BTreeMap<usize, Arc<RwLock<Vcpu>>>>,
+}
+
+#[repr(C)]
+#[derive(Debug)]
+struct RvmVcpuCreateArgs {
+    vmid: u16,
+    entry: u64,
 }
 
 impl INode for RvmINode {
@@ -51,24 +62,37 @@ impl INode for RvmINode {
         })
     }
     fn io_control(&self, cmd: u32, data: usize) -> Result<usize> {
-        info!("RVM: ioctl {:#x} {:#x}", cmd, data);
         match cmd {
             RVM_GUEST_CREATE => {
                 let phsy_mem_size = data;
+                info!("[RVM] ioctl RVM_GUEST_CREATE {:#x}", phsy_mem_size);
                 if arch::check_hypervisor_feature() {
+                    let vmid = self.get_free_vmid();
+                    if vmid >= MAX_GUEST_NUM {
+                        warn!("[RVM] to many guests ({})", MAX_GUEST_NUM);
+                        return Err(FsError::NoDeviceSpace);
+                    }
                     let guest = Guest::new(phsy_mem_size)?;
-                    let vmid = self.add_guest(guest);
+                    assert!(self.add_guest(guest) == vmid);
                     Ok(vmid)
                 } else {
-                    warn!("RVM: no hardware support");
+                    warn!("[RVM] no hardware support");
                     Err(FsError::NotSupported)
                 }
             }
             RVM_VCPU_CREATE => {
-                let vmid = data;
+                let args = copy_from_user(data as *const RvmVcpuCreateArgs)
+                    .ok_or(FsError::InvalidParam)?;
+                let vmid = args.vmid as usize;
+                info!("[RVM] ioctl RVM_VCPU_CREATE {:x?}", args);
                 if let Some(guest) = self.guests.read().get(&vmid) {
-                    let vcpu = Vcpu::new(Arc::downgrade(&guest));
-                    let vpid = self.add_vcpu(vcpu);
+                    let vpid = self.get_free_vpid();
+                    if vpid >= MAX_VCPU_NUM {
+                        warn!("[RVM] to many vcpus ({})", MAX_VCPU_NUM);
+                        return Err(FsError::NoDeviceSpace);
+                    }
+                    let vcpu = Vcpu::new(Arc::downgrade(&guest), vpid as u16, args.entry)?;
+                    assert!(self.add_vcpu(vcpu) == vpid);
                     Ok(vpid)
                 } else {
                     Err(FsError::InvalidParam)
@@ -76,6 +100,7 @@ impl INode for RvmINode {
             }
             RVM_VCPU_RESUME => {
                 let vpid = data;
+                info!("[RVM] ioctl RVM_VCPU_RESUME {:#x}", vpid);
                 if let Some(vcpu) = self.vcpus.read().get(&vpid) {
                     vcpu.write().resume();
                     Ok(0)
@@ -84,13 +109,13 @@ impl INode for RvmINode {
                 }
             }
             _ => {
-                warn!("RVM: invalid ioctl number");
+                warn!("[RVM] invalid ioctl number {:#x}", cmd);
                 Err(FsError::InvalidParam)
             }
         }
     }
     fn mmap(&self, area: MMapArea) -> Result<()> {
-        info!("RVM: mmap {:#x?}", area);
+        info!("[RVM] mmap {:x?}", area);
         Err(FsError::NotSupported)
     }
     fn as_any_ref(&self) -> &dyn Any {
@@ -110,7 +135,7 @@ impl RvmINode {
         (0..).find(|i| !self.guests.read().contains_key(i)).unwrap()
     }
 
-    pub fn add_guest(&self, guest: Guest) -> usize {
+    fn add_guest(&self, guest: Guest) -> usize {
         let vmid = self.get_free_vmid();
         self.guests
             .write()
@@ -122,7 +147,7 @@ impl RvmINode {
         (0..).find(|i| !self.vcpus.read().contains_key(i)).unwrap()
     }
 
-    pub fn add_vcpu(&self, vcpu: Vcpu) -> usize {
+    fn add_vcpu(&self, vcpu: Vcpu) -> usize {
         let vpid = self.get_free_vpid();
         self.vcpus.write().insert(vpid, Arc::new(RwLock::new(vcpu)));
         vpid

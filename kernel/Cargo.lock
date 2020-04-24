@@ -364,7 +364,7 @@ dependencies = [
  "uart_16550 0.2.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "virtio-drivers 0.1.0 (git+https://github.com/rcore-os/virtio-drivers?rev=dfa70e14)",
  "volatile 0.2.6 (registry+https://github.com/rust-lang/crates.io-index)",
- "x86_64 0.10.1 (git+https://github.com/equation314/x86_64?rev=4d1a334)",
+ "x86_64 0.10.1 (git+https://github.com/equation314/x86_64?rev=6a63680)",
  "xmas-elf 0.7.0 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
@@ -679,7 +679,7 @@ dependencies = [
 [[package]]
 name = "x86_64"
 version = "0.10.1"
-source = "git+https://github.com/equation314/x86_64?rev=4d1a334#4d1a3346090f12f7928cfb707e325581f4020f41"
+source = "git+https://github.com/equation314/x86_64?rev=6a63680#6a6368042d3c1368995de7db2da712040f0da7c6"
 dependencies = [
  "bit_field 0.9.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "bitflags 1.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -775,7 +775,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 "checksum winapi-i686-pc-windows-gnu 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)" = "ac3b87c63620426dd9b991e5ce0329eff545bccbbb34f3be09ff6fb6ab51b7b6"
 "checksum winapi-x86_64-pc-windows-gnu 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)" = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 "checksum x86 0.15.1 (registry+https://github.com/rust-lang/crates.io-index)" = "f21eecbd666e3a8edbf0b26d36f270f7a613d8986ca0eafb8205e324f7336dab"
-"checksum x86_64 0.10.1 (git+https://github.com/equation314/x86_64?rev=4d1a334)" = "<none>"
+"checksum x86_64 0.10.1 (git+https://github.com/equation314/x86_64?rev=6a63680)" = "<none>"
 "checksum x86_64 0.8.3 (registry+https://github.com/rust-lang/crates.io-index)" = "5d9e3e26fcb51976eafa310e8f2b7a5a83ae8c185443efe50cbc6534a4fffa0d"
 "checksum x86_64 0.9.6 (registry+https://github.com/rust-lang/crates.io-index)" = "4206b60c9f99766329b66962aa8ddc01df6c7edd02edc046b7a69d5df9fcdbcf"
 "checksum xmas-elf 0.7.0 (registry+https://github.com/rust-lang/crates.io-index)" = "e74de9a366f6ab8c405fa6b371d9ac24943921fa14b3d64afcb202065c405f11"

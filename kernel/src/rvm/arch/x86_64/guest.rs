@@ -1,6 +1,10 @@
+//! The guest within the hypervisor.
+
 use super::vmm::VMM_STATE;
 use crate::rvm::RvmResult;
 
+/// Represents a guest within the hypervisor.
+#[derive(Debug)]
 pub struct Guest {
     _phsy_mem_size: usize,
 }
@@ -16,6 +20,7 @@ impl Guest {
 
 impl Drop for Guest {
     fn drop(&mut self) {
+        println!("Guest free {:#x?}", self);
         VMM_STATE.lock().free();
     }
 }

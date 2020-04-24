@@ -3,6 +3,7 @@ use raw_cpuid::CpuId;
 mod guest;
 mod msr;
 mod vcpu;
+mod vmcs;
 mod vmm;
 
 pub use guest::Guest;

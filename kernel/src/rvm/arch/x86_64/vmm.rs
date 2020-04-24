@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 use spin::Mutex;
 use x86_64::registers::control::{Cr0, Cr4, Cr4Flags};
-use x86_64::{instructions::vmx, PhysAddr, VirtAddr};
+use x86_64::{instructions::vmx, PhysAddr};
 
 use rcore_memory::PAGE_SIZE;
 
@@ -14,14 +14,16 @@ use crate::rvm::{RvmError, RvmResult};
 /// A physical frame (or virtual page) of size PAGE_SIZE used as VMXON region,
 /// VMCS region, or MSR page, etc.
 #[derive(Debug)]
-struct VmxPage {
+pub struct VmxPage {
     paddr: usize,
 }
 
 impl VmxPage {
-    fn alloc() -> RvmResult<Self> {
+    pub fn alloc(fill: u8) -> RvmResult<Self> {
         if let Some(paddr) = alloc_frame() {
-            Ok(Self { paddr })
+            let page = Self { paddr };
+            unsafe { core::ptr::write_bytes(page.vaddr() as *mut u8, fill, PAGE_SIZE) };
+            Ok(page)
         } else {
             Err(RvmError::NoDeviceSpace)
         }
@@ -29,23 +31,28 @@ impl VmxPage {
 
     /// Initialize the version identifier (first 4 bytes) for VMXON region and
     /// VMCS region.
-    fn set_revision_id(&mut self, revision_id: u32) {
+    pub fn set_revision_id(&mut self, revision_id: u32) {
         let revision_id = revision_id & 0x7fff_ffff;
-        unsafe { *(phys_to_virt(self.paddr) as *mut u32) = revision_id };
+        unsafe { *self.as_ptr::<u32>() = revision_id };
     }
 
-    fn vaddr(&self) -> VirtAddr {
-        VirtAddr::new(phys_to_virt(self.paddr) as u64)
-    }
-
-    fn paddr(&self) -> PhysAddr {
+    pub fn phys_addr(&self) -> PhysAddr {
         PhysAddr::new(self.paddr as u64)
+    }
+
+    pub fn as_ptr<T>(&self) -> *mut T {
+        self.vaddr() as *mut T
+    }
+
+    fn vaddr(&self) -> usize {
+        phys_to_virt(self.paddr)
     }
 }
 
 impl Drop for VmxPage {
     fn drop(&mut self) {
-        dealloc_frame(self.paddr)
+        println!("VmxPage free {:#x?}", self);
+        dealloc_frame(self.paddr);
     }
 }
 
@@ -67,7 +74,7 @@ impl VmmState {
             let num_cpus = 1;
             self.vmxon_pages = Vec::with_capacity(num_cpus);
             for _ in 0..num_cpus {
-                self.vmxon_pages.push(VmxPage::alloc()?);
+                self.vmxon_pages.push(VmxPage::alloc(0)?);
             }
 
             // Enable VMX for all online CPUs.
@@ -123,7 +130,7 @@ impl VmmState {
         let locked = ctrl.contains(FeatureControlFlags::LOCKED);
         let vmxon_outside = ctrl.contains(FeatureControlFlags::VMXON_ENABLED_OUTSIDE_SMX);
         if locked && !vmxon_outside {
-            warn!("RVM: disabled by BIOS");
+            warn!("[RVM] disabled by BIOS");
             return Err(RvmError::NotSupported);
         }
         if !locked || !vmxon_outside {
@@ -153,8 +160,8 @@ impl VmmState {
             Cr4::write(cr4);
 
             // Execute VMXON.
-            if vmx::vmxon(page.paddr()).is_none() {
-                warn!("RVM: failed to turn on VMX on CPU {}", cpu_num);
+            if vmx::vmxon(page.phys_addr()).is_none() {
+                warn!("[RVM] failed to turn on VMX on CPU {}", cpu_num);
                 return Err(RvmError::DeviceError);
             }
         }
@@ -167,7 +174,7 @@ impl VmmState {
             // Execute VMXOFF.
             if vmx::vmxoff().is_none() {
                 warn!(
-                    "RVM: failed to turn off VMX on CPU {}",
+                    "[RVM] failed to turn off VMX on CPU {}",
                     crate::arch::cpu::id()
                 );
                 return;
