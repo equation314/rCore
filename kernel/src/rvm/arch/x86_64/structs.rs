@@ -56,6 +56,59 @@ impl Drop for VmxPage {
     }
 }
 
+#[repr(C, packed)]
+pub struct MsrListEntry {
+    msr_index: u32,
+    _reserved: u32,
+    msr_value: u64,
+}
+
+#[derive(Debug)]
+pub struct MsrList {
+    page: VmxPage,
+    count: usize,
+}
+
+impl MsrList {
+    pub fn new() -> RvmResult<Self> {
+        Ok(Self {
+            page: VmxPage::alloc(0)?,
+            count: 0,
+        })
+    }
+
+    pub fn set_count(&mut self, count: usize) {
+        // From Volume 3, Appendix A.6: Specifically, if the value bits 27:25 of
+        // IA32_VMX_MISC is N, then 512 * (N + 1) is the recommended maximum number
+        // of MSRs to be included in each list.
+        //
+        // From Volume 3, Section 24.7.2: This field specifies the number of MSRs to
+        // be stored on VM exit. It is recommended that this count not exceed 512
+        // bytes.
+        //
+        // Since these two statements conflict, we are taking the conservative
+        // minimum and asserting that: index < (512 bytes / size of MsrListEntry).
+        assert!(count < 512 / core::mem::size_of::<MsrListEntry>());
+        self.count = count;
+    }
+
+    pub fn count(&self) -> u32 {
+        self.count as u32
+    }
+
+    pub fn paddr(&self) -> u64 {
+        self.page.paddr as u64
+    }
+
+    pub unsafe fn edit_entry(&mut self, index: usize, msr_index: u32, msr_value: u64) {
+        // From Volume 3, Section 24.7.2.
+        assert!(index < self.count);
+        let entry = &mut *self.page.as_ptr::<MsrListEntry>().add(index);
+        entry.msr_index = msr_index;
+        entry.msr_value = msr_value;
+    }
+}
+
 /// Global VMX states used for all guests.
 #[derive(Default)]
 pub struct VmmState {

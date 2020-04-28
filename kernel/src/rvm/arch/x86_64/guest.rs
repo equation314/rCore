@@ -1,6 +1,6 @@
 //! The guest within the hypervisor.
 
-use super::vmm::VMM_STATE;
+use super::structs::VMM_STATE;
 use crate::rvm::RvmResult;
 
 /// Represents a guest within the hypervisor.

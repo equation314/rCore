@@ -9,6 +9,12 @@ use bitflags::bitflags;
 
 pub use x86_64::registers::model_specific::Msr;
 
+/// Control Features in Intel 64 Processor.
+pub const MSR_IA32_FEATURE_CONTROL: u32 = 0x003a;
+
+/// Per Logical Processor TSC Adjust (R/Write to clear)
+pub const MSR_IA32_TSC_ADJUST: u32 = 0x003b;
+
 /// Basic VMX information.
 pub const MSR_IA32_VMX_BASIC: u32 = 0x0480;
 
@@ -57,7 +63,29 @@ pub const MSR_IA32_VMX_TRUE_EXIT_CTLS: u32 = 0x048f;
 /// VM-Entry Flex Controls.
 pub const MSR_IA32_VMX_TRUE_ENTRY_CTLS: u32 = 0x0490;
 
-pub const MSR_IA32_FEATURE_CONTROL: u32 = 0x003a;
+/// Extended Feature Enables
+pub const MSR_IA32_EFER: u32 = 0xc000_0080;
+
+/// System Call Target Address (R/W)
+pub const MSR_IA32_STAR: u32 = 0xc000_0081;
+
+/// IA-32e Mode System Call Target Address (R/W)
+pub const MSR_IA32_LSTAR: u32 = 0xc000_0082;
+
+/// System Call Flag Mask (R/W)
+pub const MSR_IA32_FMASK: u32 = 0xc000_0084;
+
+/// Map of BASE Address of FS (R/W)
+pub const MSR_IA32_FS_BASE: u32 = 0xc000_0100;
+
+/// Map of BASE Address of GS (R/W)
+pub const MSR_IA32_GS_BASE: u32 = 0xc000_0101;
+
+/// Swap Target of BASE Address of GS (R/W)
+pub const MSR_IA32_KERNEL_GS_BASE: u32 = 0xc000_0102;
+
+/// AUXILIARY TSC Signature (R/W)
+pub const MSR_IA32_TSC_AUX: u32 = 0xc000_0103;
 
 trait MsrReadWrite {
     const MSR: Msr;

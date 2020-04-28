@@ -2,9 +2,9 @@ use raw_cpuid::CpuId;
 
 mod guest;
 mod msr;
+mod structs;
 mod vcpu;
 mod vmcs;
-mod vmm;
 
 pub use guest::Guest;
 pub use vcpu::Vcpu;

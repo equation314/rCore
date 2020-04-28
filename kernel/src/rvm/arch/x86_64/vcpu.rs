@@ -4,7 +4,12 @@ use alloc::sync::Weak;
 use spin::RwLock;
 use x86_64::instructions::vmx;
 
-use super::{msr::*, vmcs::*, vmm::VmxPage, Guest};
+use super::{
+    msr::*,
+    structs::{MsrList, VmxPage},
+    vmcs::*,
+    Guest,
+};
 use crate::rvm::{RvmError, RvmResult};
 
 /// Holds the register state used to restore a host.
@@ -73,8 +78,8 @@ pub struct Vcpu {
     _guest: Weak<RwLock<Guest>>,
     vmx_state: VmxState,
     vmcs_page: VmxPage,
-    host_msr_page: VmxPage,
-    guest_msr_page: VmxPage,
+    host_msr_list: MsrList,
+    guest_msr_list: MsrList,
 }
 
 impl Vcpu {
@@ -84,8 +89,8 @@ impl Vcpu {
         // TODO pin thread
 
         let vmx_basic = VmxBasic::read();
-        let host_msr_page = VmxPage::alloc(0)?;
-        let guest_msr_page = VmxPage::alloc(0)?;
+        let host_msr_list = MsrList::new()?;
+        let guest_msr_list = MsrList::new()?;
         let mut vmcs_page = VmxPage::alloc(0)?;
         vmcs_page.set_revision_id(vmx_basic.revision_id);
 
@@ -94,19 +99,217 @@ impl Vcpu {
             _guest: guest,
             vmx_state: VmxState::default(),
             vmcs_page,
-            host_msr_page,
-            guest_msr_page,
+            host_msr_list,
+            guest_msr_list,
         };
-        vcpu.init_vmcs(entry)?;
         println!("{:#x?}", vcpu);
+        unsafe { vcpu.init_vmcs(entry)? };
         Ok(vcpu)
     }
 
     pub fn resume(&mut self) {}
 
-    fn init_vmcs(&mut self, entry: u64) -> RvmResult<()> {
-        unsafe { vmx::vmclear(self.vmcs_page.phys_addr()).ok_or(RvmError::DeviceError)? };
-        let vmcs = AutoVmcs::new(self.vmcs_page.phys_addr())?;
+    unsafe fn init_vmcs(&mut self, entry: u64) -> RvmResult<()> {
+        vmx::vmclear(self.vmcs_page.phys_addr()).ok_or(RvmError::DeviceError)?;
+        let mut vmcs = AutoVmcs::new(self.vmcs_page.phys_addr())?;
+        self.setup_msr_list();
+        self.init_vmcs_host(&mut vmcs)?;
+        self.init_vmcs_control(&mut vmcs)?;
+        self.init_vmcs_guest(&mut vmcs, entry)?;
+        Ok(())
+    }
+
+    unsafe fn setup_msr_list(&mut self) {
+        let msr_list = [
+            MSR_IA32_KERNEL_GS_BASE,
+            MSR_IA32_STAR,
+            MSR_IA32_LSTAR,
+            MSR_IA32_FMASK,
+            MSR_IA32_TSC_ADJUST,
+            MSR_IA32_TSC_AUX,
+        ];
+        let count = msr_list.len();
+        self.host_msr_list.set_count(count);
+        self.guest_msr_list.set_count(count);
+        for (i, &msr) in msr_list.iter().enumerate() {
+            self.host_msr_list.edit_entry(i, msr, Msr::new(msr).read());
+            self.guest_msr_list.edit_entry(i, msr, 0);
+        }
+    }
+
+    unsafe fn init_vmcs_host(&self, _vmcs: &mut AutoVmcs) -> RvmResult<()> {
+        Ok(())
+    }
+
+    unsafe fn init_vmcs_guest(&self, _vmcs: &mut AutoVmcs, _entry: u64) -> RvmResult<()> {
+        Ok(())
+    }
+
+    unsafe fn init_vmcs_control(&self, vmcs: &mut AutoVmcs) -> RvmResult<()> {
+        use PinBasedVmExecControls as PinCtrl;
+        use ProcBasedVmExecControls as ProcCtrl;
+        use ProcBasedVmExecControls2 as ProcCtrl2;
+
+        // Setup secondary processor-based VMCS controls.
+        vmcs.set_control(
+            VmcsField32::SECONDARY_VM_EXEC_CONTROL,
+            Msr::new(MSR_IA32_VMX_PROCBASED_CTLS2).read(),
+            0,
+            (ProcCtrl2::EPT
+                | ProcCtrl2::RDTSCP
+                | ProcCtrl2::VIRTUAL_X2APIC
+                | ProcCtrl2::VPID
+                | ProcCtrl2::UNRESTRICTED_GUEST)
+                .bits(),
+            0,
+        )?;
+        // Enable use of INVPCID instruction if available.
+        vmcs.set_control(
+            VmcsField32::SECONDARY_VM_EXEC_CONTROL,
+            Msr::new(MSR_IA32_VMX_PROCBASED_CTLS2).read(),
+            vmcs.read32(VmcsField32::SECONDARY_VM_EXEC_CONTROL) as u64,
+            ProcCtrl2::INVPCID.bits(),
+            0,
+        )
+        .ok();
+
+        // Setup pin-based VMCS controls.
+        vmcs.set_control(
+            VmcsField32::PIN_BASED_VM_EXEC_CONTROL,
+            Msr::new(MSR_IA32_VMX_TRUE_PINBASED_CTLS).read(),
+            Msr::new(MSR_IA32_VMX_PINBASED_CTLS).read(),
+            (PinCtrl::INTR_EXITING | PinCtrl::NMI_EXITING).bits(),
+            0,
+        )?;
+
+        // Setup primary processor-based VMCS controls.
+        vmcs.set_control(
+            VmcsField32::CPU_BASED_VM_EXEC_CONTROL,
+            Msr::new(MSR_IA32_VMX_TRUE_PROCBASED_CTLS).read(),
+            Msr::new(MSR_IA32_VMX_PROCBASED_CTLS).read(),
+            // Enable XXX
+            (ProcCtrl::HLT_EXITING
+                | ProcCtrl::VIRTUAL_TPR
+                | ProcCtrl::UNCOND_IO_EXITING
+                | ProcCtrl::USE_MSR_BITMAPS
+                | ProcCtrl::PAUSE_EXITING
+                | ProcCtrl::SEC_CONTROLS)
+                .bits(),
+            // Disable XXX
+            (ProcCtrl::CR3_LOAD_EXITING
+                | ProcCtrl::CR3_STORE_EXITING
+                | ProcCtrl::CR8_LOAD_EXITING
+                | ProcCtrl::CR8_STORE_EXITING)
+                .bits(),
+        )?;
+        // TODO: InterruptWindowExiting?
+
+        // Setup VM-exit VMCS controls.
+        vmcs.set_control(
+            VmcsField32::VM_EXIT_CONTROLS,
+            Msr::new(MSR_IA32_VMX_TRUE_EXIT_CTLS).read(),
+            Msr::new(MSR_IA32_VMX_EXIT_CTLS).read(),
+            (VmExitControls::HOST_ADDR_SPACE_SIZE
+                | VmExitControls::SAVE_IA32_PAT
+                | VmExitControls::LOAD_IA32_PAT
+                | VmExitControls::SAVE_IA32_EFER
+                | VmExitControls::LOAD_IA32_EFER
+                | VmExitControls::ACK_INTR_ON_EXIT)
+                .bits(),
+            0,
+        )?;
+
+        // Setup VM-entry VMCS controls.
+        vmcs.set_control(
+            VmcsField32::VM_ENTRY_CONTROLS,
+            Msr::new(MSR_IA32_VMX_TRUE_ENTRY_CTLS).read(),
+            Msr::new(MSR_IA32_VMX_ENTRY_CTLS).read(),
+            (VmEntryControls::LOAD_IA32_PAT | VmEntryControls::LOAD_IA32_EFER).bits(),
+            0,
+        )?;
+
+        // From Volume 3, Section 24.6.3: The exception bitmap is a 32-bit field
+        // that contains one bit for each exception. When an exception occurs,
+        // its vector is used to select a bit in this field. If the bit is 1,
+        // the exception causes a VM exit. If the bit is 0, the exception is
+        // delivered normally through the IDT, using the descriptor
+        // corresponding to the exception’s vector.
+        //
+        // From Volume 3, Section 25.2: If software desires VM exits on all page
+        // faults, it can set bit 14 in the exception bitmap to 1 and set the
+        // page-fault error-code mask and match fields each to 00000000H.
+        vmcs.write32(VmcsField32::EXCEPTION_BITMAP, 0);
+        vmcs.write32(VmcsField32::PAGE_FAULT_ERROR_CODE_MASK, 0);
+        vmcs.write32(VmcsField32::PAGE_FAULT_ERROR_CODE_MATCH, 0);
+
+        // From Volume 3, Section 28.1: Virtual-processor identifiers (VPIDs)
+        // introduce to VMX operation a facility by which a logical processor may
+        // cache information for multiple linear-address spaces. When VPIDs are
+        // used, VMX transitions may retain cached information and the logical
+        // processor switches to a different linear-address space.
+        //
+        // From Volume 3, Section 26.2.1.1: If the “enable VPID” VM-execution
+        // control is 1, the value of the VPID VM-execution control field must not
+        // be 0000H.
+        //
+        // From Volume 3, Section 28.3.3.3: If EPT is in use, the logical processor
+        // associates all mappings it creates with the value of bits 51:12 of
+        // current EPTP. If a VMM uses different EPTP values for different guests,
+        // it may use the same VPID for those guests.
+        //
+        // From Volume 3, Section 28.3.3.1: Operations that architecturally
+        // invalidate entries in the TLBs or paging-structure caches independent of
+        // VMX operation (e.g., the INVLPG and INVPCID instructions) invalidate
+        // linear mappings and combined mappings. They are required to do so only
+        // for the current VPID (but, for combined mappings, all EP4TAs). Linear
+        // mappings for the current VPID are invalidated even if EPT is in use.
+        // Combined mappings for the current VPID are invalidated even if EPT is
+        // not in use.
+        vmcs.write16(VmcsField16::VIRTUAL_PROCESSOR_ID, self.vpid);
+
+        // TODO: write EPT pointer
+        // From Volume 3, Section 28.2: The extended page-table mechanism (EPT) is a
+        // feature that can be used to support the virtualization of physical
+        // memory. When EPT is in use, certain addresses that would normally be
+        // treated as physical addresses (and used to access memory) are instead
+        // treated as guest-physical addresses. Guest-physical addresses are
+        // translated by traversing a set of EPT paging structures to produce
+        // physical addresses that are used to access memory.
+        vmcs.write64(VmcsField64::EPT_POINTER, 0); // TODO: eptp
+
+        // From Volume 3, Section 28.3.3.4: Software can use an INVEPT with type all
+        // ALL_CONTEXT to prevent undesired retention of cached EPT information. Here,
+        // we only care about invalidating information associated with this EPTP.
+        vmx::invept(vmx::InvEptType::SingleContext, 0); // TODO: eptp
+
+        // Setup MSR handling.
+        vmcs.write64(VmcsField64::MSR_BITMAP, 0); // TODO: msr_bitmap_addr
+
+        vmcs.write64(
+            VmcsField64::VM_EXIT_MSR_LOAD_ADDR,
+            self.host_msr_list.paddr(),
+        );
+        vmcs.write32(
+            VmcsField32::VM_EXIT_MSR_LOAD_COUNT,
+            self.host_msr_list.count(),
+        );
+        vmcs.write64(
+            VmcsField64::VM_EXIT_MSR_STORE_ADDR,
+            self.guest_msr_list.paddr(),
+        );
+        vmcs.write32(
+            VmcsField32::VM_EXIT_MSR_STORE_COUNT,
+            self.guest_msr_list.count(),
+        );
+        vmcs.write64(
+            VmcsField64::VM_ENTRY_MSR_LOAD_ADDR,
+            self.guest_msr_list.paddr(),
+        );
+        vmcs.write32(
+            VmcsField32::VM_ENTRY_MSR_LOAD_COUNT,
+            self.guest_msr_list.count(),
+        );
+
         Ok(())
     }
 }

@@ -1,11 +1,12 @@
-//! Virtual Machine Control Structures
+//! Virtual Machine Control Structures.
 
+use bitflags::bitflags;
 use x86_64::{instructions::vmx, PhysAddr};
 
 use crate::arch::interrupt;
 use crate::rvm::{RvmError, RvmResult};
 
-/// 16-Bit Fields
+/// 16-Bit VMCS Fields.
 #[repr(usize)]
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
@@ -32,7 +33,7 @@ pub enum VmcsField16 {
     HOST_TR_SELECTOR = 0x00000c0c,
 }
 
-/// 64-Bit Fields
+/// 64-Bit VMCS Fields.
 #[repr(usize)]
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
@@ -75,9 +76,13 @@ pub enum VmcsField64 {
     EPTP_LIST_ADDRESS = 0x00002024,
     EPTP_LIST_ADDRESS_HIGH = 0x00002025,
     VMREAD_BITMAP = 0x00002026,
+    VMREAD_BITMAP_HIGH = 0x00002027,
     VMWRITE_BITMAP = 0x00002028,
+    VMWRITE_BITMAP_HIGH = 0x00002029,
     XSS_EXIT_BITMAP = 0x0000202C,
     XSS_EXIT_BITMAP_HIGH = 0x0000202D,
+    ENCLS_EXITING_BITMAP = 0x0000202E,
+    ENCLS_EXITING_BITMAP_HIGH = 0x0000202F,
     TSC_MULTIPLIER = 0x00002032,
     TSC_MULTIPLIER_HIGH = 0x00002033,
     GUEST_PHYSICAL_ADDRESS = 0x00002400,
@@ -102,6 +107,8 @@ pub enum VmcsField64 {
     GUEST_PDPTR3_HIGH = 0x00002811,
     GUEST_BNDCFGS = 0x00002812,
     GUEST_BNDCFGS_HIGH = 0x00002813,
+    GUEST_IA32_RTIT_CTL = 0x00002814,
+    GUEST_IA32_RTIT_CTL_HIGH = 0x00002815,
     HOST_IA32_PAT = 0x00002c00,
     HOST_IA32_PAT_HIGH = 0x00002c01,
     HOST_IA32_EFER = 0x00002c02,
@@ -110,7 +117,7 @@ pub enum VmcsField64 {
     HOST_IA32_PERF_GLOBAL_CTRL_HIGH = 0x00002c05,
 }
 
-/// 32-Bit Fields
+/// 32-Bit VMCS Fields.
 #[repr(usize)]
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
@@ -167,7 +174,7 @@ pub enum VmcsField32 {
     HOST_IA32_SYSENTER_CS = 0x00004c00,
 }
 
-/// Natural-Width Fields
+/// Natural-Width VMCS Fields.
 #[repr(usize)]
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
@@ -217,6 +224,172 @@ pub enum VmcsFieldXX {
     HOST_RIP = 0x00006c16,
 }
 
+bitflags! {
+    /// Definitions of Pin-Based VM-Execution Controls.
+    pub struct PinBasedVmExecControls: u32 {
+        /// VM-Exit on vectored interrupts
+        const INTR_EXITING      = 1 << 0;
+        /// VM-Exit on NMIs
+        const NMI_EXITING       = 1 << 3;
+        /// NMI virtualization
+        const VIRTUAL_NMIS      = 1 << 5;
+        /// VMX Preemption Timer
+        const PREEMPTION_TIMER  = 1 << 6;
+        /// Posted Interrupts
+        const POSTED_INTR       = 1 << 7;
+    }
+}
+
+bitflags! {
+    /// Definitions of Primary Processor-Based VM-Execution Controls.
+    pub struct ProcBasedVmExecControls: u32 {
+        /// VM-Exit if INTRs are unblocked in guest
+        const INTR_WINDOW_EXITING   = 1 <<  2;
+        /// Offset hardware TSC when read in guest
+        const USE_TSC_OFFSETTING    = 1 <<  3;
+        /// VM-Exit on HLT
+        const HLT_EXITING           = 1 <<  7;
+        /// VM-Exit on INVLPG
+        const INVLPG_EXITING        = 1 <<  9;
+        /// VM-Exit on MWAIT
+        const MWAIT_EXITING         = 1 << 10;
+        /// VM-Exit on RDPMC
+        const RDPMC_EXITING         = 1 << 11;
+        /// VM-Exit on RDTSC
+        const RDTSC_EXITING         = 1 << 12;
+        /// VM-Exit on writes to CR3
+        const CR3_LOAD_EXITING      = 1 << 15;
+        /// VM-Exit on reads from CR3
+        const CR3_STORE_EXITING     = 1 << 16;
+        /// VM-Exit on writes to CR8
+        const CR8_LOAD_EXITING      = 1 << 19;
+        /// VM-Exit on reads from CR8
+        const CR8_STORE_EXITING     = 1 << 20;
+        /// TPR virtualization, a.k.a. TPR shadow
+        const VIRTUAL_TPR           = 1 << 21;
+        /// VM-Exit if NMIs are unblocked in guest
+        const NMI_WINDOW_EXITING    = 1 << 22;
+        /// VM-Exit on accesses to debug registers
+        const MOV_DR_EXITING        = 1 << 23;
+        /// VM-Exit on *all* IN{S} and OUT{S}
+        const UNCOND_IO_EXITING     = 1 << 24;
+        /// VM-Exit based on I/O port
+        const USE_IO_BITMAPS        = 1 << 25;
+        /// VMX single-step VM-Exits
+        const MONITOR_TRAP_FLAG     = 1 << 27;
+        /// VM-Exit based on MSR index
+        const USE_MSR_BITMAPS       = 1 << 28;
+        /// M-Exit on MONITOR (MWAIT's accomplice)
+        const MONITOR_EXITING       = 1 << 29;
+        /// VM-Exit on PAUSE (unconditionally)
+        const PAUSE_EXITING         = 1 << 30;
+        /// Enable Secondary VM-Execution Controls
+        const SEC_CONTROLS          = 1 << 31;
+    }
+}
+
+bitflags! {
+    /// Definitions of Secondary Processor-Based VM-Execution Controls.
+    pub struct ProcBasedVmExecControls2: u32 {
+        /// Virtualize memory mapped APIC accesses
+        const VIRT_APIC_ACCESSES    = 1 <<  0;
+        /// Extended Page Tables, a.k.a. Two-Dimensional Paging
+        const EPT                   = 1 <<  1;
+        /// VM-Exit on {S,L}*DT instructions
+        const DESC_EXITING          = 1 <<  2;
+        /// Enable RDTSCP in guest
+        const RDTSCP                = 1 <<  3;
+        /// Virtualize X2APIC for the guest
+        const VIRTUAL_X2APIC        = 1 <<  4;
+        /// Virtual Processor ID (TLB ASID modifier)
+        const VPID                  = 1 <<  5;
+        /// VM-Exit on WBINVD
+        const WBINVD_EXITING        = 1 <<  6;
+        /// Allow Big Real Mode and other "invalid" states
+        const UNRESTRICTED_GUEST    = 1 <<  7;
+        /// Hardware emulation of reads to the virtual-APIC
+        const APIC_REGISTER_VIRT    = 1 <<  8;
+        /// Evaluation and delivery of pending virtual interrupts
+        const VIRT_INTR_DELIVERY    = 1 <<  9;
+        /// Conditionally VM-Exit on PAUSE at CPL0
+        const PAUSE_LOOP_EXITING    = 1 << 10;
+        /// VM-Exit on RDRAND
+        const RDRAND_EXITING        = 1 << 11;
+        /// Enable INVPCID in guest
+        const INVPCID               = 1 << 12;
+        /// Enable VM-Functions (leaf dependent)
+        const VMFUNC                = 1 << 13;
+        /// VMREAD/VMWRITE in guest can access shadow VMCS
+        const SHADOW_VMCS           = 1 << 14;
+        /// VM-Exit on ENCLS (leaf dependent)
+        const ENCLS_EXITING         = 1 << 15;
+        /// VM-Exit on RDSEED
+        const RDSEED_EXITING        = 1 << 16;
+        /// Log dirty pages into buffer
+        const PAGE_MOD_LOGGING      = 1 << 17;
+        /// Conditionally reflect EPT violations as #VE exceptions
+        const EPT_VIOLATION_VE      = 1 << 18;
+        /// Suppress VMX indicators in Processor Trace
+        const PT_CONCEAL_VMX        = 1 << 19;
+        /// Enable XSAVES and XRSTORS in guest
+        const XSAVES                = 1 << 20;
+        /// Enable separate EPT EXEC bits for supervisor vs. user
+        const MODE_BASED_EPT_EXEC   = 1 << 22;
+        /// Processor Trace logs GPAs
+        const PT_USE_GPA            = 1 << 24;
+        /// Scale hardware TSC when read in guest
+        const TSC_SCALING           = 1 << 25;
+        /// Enable TPAUSE, UMONITOR, UMWAIT in guest
+        const USR_WAIT_PAUSE        = 1 << 26;
+        /// VM-Exit on ENCLV (leaf dependent)
+        const ENCLV_EXITING         = 1 << 28;
+    }
+}
+
+bitflags! {
+    /// Definitions of VM-Exit Controls.
+    pub struct VmExitControls: u32 {
+        const SAVE_DEBUG_CONTROLS           = 1 <<  2;
+        /// Logical processor is in 64-bit mode after VM exit.
+        const HOST_ADDR_SPACE_SIZE          = 1 <<  9;
+        const LOAD_IA32_PERF_GLOBAL_CTRL    = 1 << 12;
+        /// Acknowledge external interrupt on exit.
+        const ACK_INTR_ON_EXIT              = 1 << 15;
+        /// Save the guest IA32_PAT MSR on exit.
+        const SAVE_IA32_PAT                 = 1 << 18;
+        /// Load the guest IA32_PAT MSR on exit.
+        const LOAD_IA32_PAT                 = 1 << 19;
+        /// Save the guest IA32_EFER MSR on exit.
+        const SAVE_IA32_EFER                = 1 << 20;
+        /// LoaLoad the host IA32_EFER MSR on exit.
+        const LOAD_IA32_EFER                = 1 << 21;
+        const SAVE_VMX_PREEMPTION_TIMER     = 1 << 22;
+        const CLEAR_BNDCFGS                 = 1 << 23;
+        const PT_CONCEAL_PIP                = 1 << 24;
+        const CLEAR_IA32_RTIT_CTL           = 1 << 25;
+        const LOAD_CET_STATE                = 1 << 28;
+    }
+}
+
+bitflags! {
+    /// Definitions of VM-Entry Controls.
+    pub struct VmEntryControls: u32 {
+        const LOAD_DEBUG_CONTROLS           = 1 <<  2;
+        const IA32E_MODE                    = 1 <<  9;
+        const SMM                           = 1 << 10;
+        const DEACT_DUAL_MONITOR            = 1 << 11;
+        const LOAD_IA32_PERF_GLOBAL_CTRL    = 1 << 13;
+        /// Load the guest IA32_PAT MSR on entry.
+        const LOAD_IA32_PAT                 = 1 << 14;
+        /// Load the guest IA32_EFER MSR on entry.
+        const LOAD_IA32_EFER                = 1 << 15;
+        const LOAD_BNDCFGS                  = 1 << 16;
+        const PT_CONCEAL_PIP                = 1 << 17;
+        const LOAD_IA32_RTIT_CTL            = 1 << 18;
+        const LOAD_CET_STATE                = 1 << 20;
+    }
+}
+
 /// Loads a VMCS within a given scope.
 #[derive(Debug)]
 pub struct AutoVmcs {
@@ -228,11 +401,15 @@ impl AutoVmcs {
     pub fn new(phys_addr: PhysAddr) -> RvmResult<Self> {
         unsafe {
             let interrupt_flags = interrupt::disable_and_store();
-            vmx::vmptrld(phys_addr).ok_or(RvmError::DeviceError)?;
-            Ok(Self {
-                vmcs_paddr: phys_addr.as_u64(),
-                interrupt_flags,
-            })
+            if vmx::vmptrld(phys_addr).is_none() {
+                interrupt::restore(interrupt_flags);
+                Err(RvmError::DeviceError)
+            } else {
+                Ok(Self {
+                    vmcs_paddr: phys_addr.as_u64(),
+                    interrupt_flags,
+                })
+            }
         }
     }
 
@@ -277,6 +454,43 @@ impl AutoVmcs {
     #[allow(non_snake_case)]
     pub fn writeXX(&mut self, field: VmcsFieldXX, value: usize) {
         self.write(field as usize, value);
+    }
+
+    pub fn set_control(
+        &mut self,
+        field: VmcsField32,
+        true_msr: u64,
+        old_msr: u64,
+        set: u32,
+        clear: u32,
+    ) -> RvmResult<()> {
+        debug_assert!(self.vmcs_paddr != 0);
+        let allowed_0 = true_msr as u32;
+        let allowed_1 = (true_msr >> 32) as u32;
+        if (allowed_1 & set) != set {
+            warn!("[RVM] can not set vmcs controls {:?}", field);
+            return Err(RvmError::NotSupported);
+        }
+        if (!allowed_0 & clear) != clear {
+            warn!("[RVM] can not clear vmcs controls {:?}", field);
+            return Err(RvmError::NotSupported);
+        }
+        if (set & clear) != 0 {
+            warn!(
+                "[RVM] can not set and clear the same vmcs controls {:?}",
+                field
+            );
+            return Err(RvmError::InvalidParam);
+        }
+
+        // See Volume 3, Section 31.5.1, Algorithm 3, Part C. If the control can be
+        // either 0 or 1 (flexible), and the control is unknown, then refer to the
+        // old MSR to find the default value.
+        let flexible = allowed_0 ^ allowed_1;
+        let unknown = flexible & !(set | clear);
+        let defaults = unknown & old_msr as u32;
+        self.write32(field, allowed_0 | defaults | set);
+        Ok(())
     }
 
     #[inline]
