@@ -4,6 +4,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use x86_64::registers::model_specific::Msr;
 use x86_64::structures::gdt::*;
 use x86_64::structures::tss::TaskStateSegment;
+use x86_64::structures::DescriptorTablePointer;
 use x86_64::{PrivilegeLevel, VirtAddr};
 
 use crate::consts::MAX_CPU_NUM;
@@ -77,6 +78,9 @@ impl Cpu {
     pub fn can_preempt(&self) -> bool {
         self.preemption_disabled.load(Ordering::Relaxed)
     }
+    pub fn tss_base(&self) -> usize {
+        &self.tss as *const _ as usize
+    }
     unsafe fn init(&'static mut self) {
         use x86_64::instructions::segmentation::set_cs;
         use x86_64::instructions::tables::load_tss;
@@ -101,7 +105,7 @@ impl Cpu {
         // for fast syscall:
         // store address of TSS to kernel_gsbase
         let mut kernel_gsbase = Msr::new(0xC0000102);
-        kernel_gsbase.write(&self.tss as *const _ as u64);
+        kernel_gsbase.write(self.tss_base() as u64);
     }
 
     /// 设置从Ring3跳到Ring0时，自动切换栈的地址
@@ -133,3 +137,11 @@ pub const UCODE32_SELECTOR: SegmentSelector = SegmentSelector::new(3, PrivilegeL
 pub const UDATA32_SELECTOR: SegmentSelector = SegmentSelector::new(4, PrivilegeLevel::Ring3);
 pub const UCODE_SELECTOR: SegmentSelector = SegmentSelector::new(5, PrivilegeLevel::Ring3);
 pub const TSS_SELECTOR: SegmentSelector = SegmentSelector::new(6, PrivilegeLevel::Ring0);
+
+/// Get current GDT register
+#[inline]
+pub unsafe fn sgdt() -> DescriptorTablePointer {
+    let mut gdt = DescriptorTablePointer { limit: 0, base: 0 };
+    asm!("sgdt ($0)" :: "r" (&mut gdt) : "memory" : "volatile");
+    gdt
+}

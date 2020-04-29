@@ -1,8 +1,10 @@
 //! The virtual CPU within a guest.
 
-use alloc::sync::Weak;
-use spin::RwLock;
-use x86_64::instructions::vmx;
+use alloc::{boxed::Box, sync::Weak};
+use x86_64::{
+    instructions::vmx,
+    registers::control::{Cr0, Cr3, Cr4},
+};
 
 use super::{
     msr::*,
@@ -10,6 +12,7 @@ use super::{
     vmcs::*,
     Guest,
 };
+use crate::arch::{gdt, idt};
 use crate::rvm::{RvmError, RvmResult};
 
 /// Holds the register state used to restore a host.
@@ -75,7 +78,7 @@ struct VmxState {
 #[derive(Debug)]
 pub struct Vcpu {
     vpid: u16,
-    _guest: Weak<RwLock<Guest>>,
+    _guest: Weak<Box<Guest>>,
     vmx_state: VmxState,
     vmcs_page: VmxPage,
     host_msr_list: MsrList,
@@ -83,9 +86,7 @@ pub struct Vcpu {
 }
 
 impl Vcpu {
-    pub fn new(guest: Weak<RwLock<Guest>>, vpid: u16, entry: u64) -> RvmResult<Self> {
-        println!("{:#x} {:#x}", vpid, entry);
-
+    pub fn new(vpid: u16, guest: Weak<Box<Guest>>) -> RvmResult<Box<Self>> {
         // TODO pin thread
 
         let vmx_basic = VmxBasic::read();
@@ -94,31 +95,31 @@ impl Vcpu {
         let mut vmcs_page = VmxPage::alloc(0)?;
         vmcs_page.set_revision_id(vmx_basic.revision_id);
 
-        let mut vcpu = Self {
+        Ok(Box::new(Self {
             vpid,
             _guest: guest,
             vmx_state: VmxState::default(),
             vmcs_page,
             host_msr_list,
             guest_msr_list,
-        };
-        println!("{:#x?}", vcpu);
-        unsafe { vcpu.init_vmcs(entry)? };
-        Ok(vcpu)
+        }))
     }
 
     pub fn resume(&mut self) {}
 
-    unsafe fn init_vmcs(&mut self, entry: u64) -> RvmResult<()> {
-        vmx::vmclear(self.vmcs_page.phys_addr()).ok_or(RvmError::DeviceError)?;
-        let mut vmcs = AutoVmcs::new(self.vmcs_page.phys_addr())?;
-        self.setup_msr_list();
-        self.init_vmcs_host(&mut vmcs)?;
-        self.init_vmcs_control(&mut vmcs)?;
-        self.init_vmcs_guest(&mut vmcs, entry)?;
+    pub fn init(&mut self, entry: u64) -> RvmResult<()> {
+        unsafe {
+            vmx::vmclear(self.vmcs_page.phys_addr()).ok_or(RvmError::DeviceError)?;
+            let mut vmcs = AutoVmcs::new(self.vmcs_page.phys_addr())?;
+            self.setup_msr_list();
+            self.init_vmcs_host(&mut vmcs)?;
+            self.init_vmcs_control(&mut vmcs)?;
+            self.init_vmcs_guest(&mut vmcs, entry)?;
+        }
         Ok(())
     }
 
+    /// Setup MSRs to be stored and loaded on VM exits/entrie.
     unsafe fn setup_msr_list(&mut self) {
         let msr_list = [
             MSR_IA32_KERNEL_GS_BASE,
@@ -137,14 +138,49 @@ impl Vcpu {
         }
     }
 
-    unsafe fn init_vmcs_host(&self, _vmcs: &mut AutoVmcs) -> RvmResult<()> {
+    /// Setup VMCS host state.
+    unsafe fn init_vmcs_host(&self, vmcs: &mut AutoVmcs) -> RvmResult<()> {
+        vmcs.write64(VmcsField64::HOST_IA32_PAT, Msr::new(MSR_IA32_EFER).read());
+        vmcs.write64(VmcsField64::HOST_IA32_EFER, Msr::new(MSR_IA32_EFER).read());
+        vmcs.writeXX(VmcsFieldXX::HOST_CR0, Cr0::read_raw() as usize);
+        let cr3 = Cr3::read();
+        vmcs.writeXX(
+            VmcsFieldXX::HOST_CR3,
+            (cr3.0.start_address().as_u64() | cr3.1.bits()) as usize,
+        );
+        vmcs.writeXX(VmcsFieldXX::HOST_CR4, Cr4::read_raw() as usize);
+        vmcs.write16(VmcsField16::HOST_ES_SELECTOR, 0);
+        vmcs.write16(VmcsField16::HOST_CS_SELECTOR, gdt::KCODE_SELECTOR.0);
+        vmcs.write16(VmcsField16::HOST_SS_SELECTOR, gdt::KDATA_SELECTOR.0);
+        vmcs.write16(VmcsField16::HOST_DS_SELECTOR, 0);
+        vmcs.write16(VmcsField16::HOST_FS_SELECTOR, 0);
+        vmcs.write16(VmcsField16::HOST_GS_SELECTOR, 0);
+        vmcs.write16(VmcsField16::HOST_TR_SELECTOR, gdt::TSS_SELECTOR.0);
+        vmcs.writeXX(
+            VmcsFieldXX::HOST_FS_BASE,
+            Msr::new(MSR_IA32_FS_BASE).read() as usize,
+        );
+        vmcs.writeXX(
+            VmcsFieldXX::HOST_GS_BASE,
+            Msr::new(MSR_IA32_GS_BASE).read() as usize,
+        );
+        vmcs.writeXX(VmcsFieldXX::HOST_TR_BASE, gdt::Cpu::current().tss_base());
+        vmcs.writeXX(VmcsFieldXX::HOST_GDTR_BASE, gdt::sgdt().base as usize);
+        vmcs.writeXX(VmcsFieldXX::HOST_IDTR_BASE, idt::sidt().base as usize);
+        vmcs.writeXX(VmcsFieldXX::HOST_IA32_SYSENTER_ESP, 0);
+        vmcs.writeXX(VmcsFieldXX::HOST_IA32_SYSENTER_EIP, 0);
+        vmcs.write32(VmcsField32::HOST_IA32_SYSENTER_CS, 0);
+        vmcs.writeXX(VmcsFieldXX::HOST_RSP, &self.vmx_state as *const _ as usize);
+        vmcs.writeXX(VmcsFieldXX::HOST_RIP, 0); // TODO: vm exit entry
         Ok(())
     }
 
+    /// Setup VMCS guest state.
     unsafe fn init_vmcs_guest(&self, _vmcs: &mut AutoVmcs, _entry: u64) -> RvmResult<()> {
         Ok(())
     }
 
+    /// Setup VMCS control fields.
     unsafe fn init_vmcs_control(&self, vmcs: &mut AutoVmcs) -> RvmResult<()> {
         use PinBasedVmExecControls as PinCtrl;
         use ProcBasedVmExecControls as ProcCtrl;
@@ -267,7 +303,6 @@ impl Vcpu {
         // not in use.
         vmcs.write16(VmcsField16::VIRTUAL_PROCESSOR_ID, self.vpid);
 
-        // TODO: write EPT pointer
         // From Volume 3, Section 28.2: The extended page-table mechanism (EPT) is a
         // feature that can be used to support the virtualization of physical
         // memory. When EPT is in use, certain addresses that would normally be

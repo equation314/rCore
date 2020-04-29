@@ -15,6 +15,9 @@ pub const MSR_IA32_FEATURE_CONTROL: u32 = 0x003a;
 /// Per Logical Processor TSC Adjust (R/Write to clear)
 pub const MSR_IA32_TSC_ADJUST: u32 = 0x003b;
 
+/// IA32_PAT (R/W)
+pub const MSR_IA32_PAT: u32 = 0x0227;
+
 /// Basic VMX information.
 pub const MSR_IA32_VMX_BASIC: u32 = 0x0480;
 

@@ -413,7 +413,7 @@ impl AutoVmcs {
         }
     }
 
-    pub fn invalidate(&mut self) {
+    pub fn _invalidate(&mut self) {
         self.vmcs_paddr = 0;
     }
 

@@ -1,6 +1,6 @@
 //! Implement INode for Rcore Virtual Machine
 
-use alloc::{collections::BTreeMap, sync::Arc};
+use alloc::{boxed::Box, collections::BTreeMap, sync::Arc};
 use core::any::Any;
 use spin::RwLock;
 
@@ -18,8 +18,8 @@ const RVM_VCPU_CREATE: u32 = RVM_IO + 0x11;
 const RVM_VCPU_RESUME: u32 = RVM_IO + 0x12;
 
 pub struct RvmINode {
-    guests: RwLock<BTreeMap<usize, Arc<RwLock<Guest>>>>,
-    vcpus: RwLock<BTreeMap<usize, Arc<RwLock<Vcpu>>>>,
+    guests: RwLock<BTreeMap<usize, Arc<Box<Guest>>>>,
+    vcpus: RwLock<BTreeMap<usize, Box<Vcpu>>>,
 }
 
 #[repr(C)]
@@ -91,7 +91,8 @@ impl INode for RvmINode {
                         warn!("[RVM] to many vcpus ({})", MAX_VCPU_NUM);
                         return Err(FsError::NoDeviceSpace);
                     }
-                    let vcpu = Vcpu::new(Arc::downgrade(&guest), vpid as u16, args.entry)?;
+                    let mut vcpu = Vcpu::new(vpid as u16, Arc::downgrade(guest))?;
+                    vcpu.init(args.entry)?;
                     assert!(self.add_vcpu(vcpu) == vpid);
                     Ok(vpid)
                 } else {
@@ -101,8 +102,8 @@ impl INode for RvmINode {
             RVM_VCPU_RESUME => {
                 let vpid = data;
                 info!("[RVM] ioctl RVM_VCPU_RESUME {:#x}", vpid);
-                if let Some(vcpu) = self.vcpus.read().get(&vpid) {
-                    vcpu.write().resume();
+                if let Some(vcpu) = self.vcpus.write().get_mut(&vpid) {
+                    vcpu.resume();
                     Ok(0)
                 } else {
                     Err(FsError::InvalidParam)
@@ -135,11 +136,9 @@ impl RvmINode {
         (0..).find(|i| !self.guests.read().contains_key(i)).unwrap()
     }
 
-    fn add_guest(&self, guest: Guest) -> usize {
+    fn add_guest(&self, guest: Box<Guest>) -> usize {
         let vmid = self.get_free_vmid();
-        self.guests
-            .write()
-            .insert(vmid, Arc::new(RwLock::new(guest)));
+        self.guests.write().insert(vmid, Arc::new(guest));
         vmid
     }
 
@@ -147,9 +146,9 @@ impl RvmINode {
         (0..).find(|i| !self.vcpus.read().contains_key(i)).unwrap()
     }
 
-    fn add_vcpu(&self, vcpu: Vcpu) -> usize {
+    fn add_vcpu(&self, vcpu: Box<Vcpu>) -> usize {
         let vpid = self.get_free_vpid();
-        self.vcpus.write().insert(vpid, Arc::new(RwLock::new(vcpu)));
+        self.vcpus.write().insert(vpid, vcpu);
         vpid
     }
 

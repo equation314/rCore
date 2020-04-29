@@ -1,5 +1,7 @@
 //! The guest within the hypervisor.
 
+use alloc::boxed::Box;
+
 use super::structs::VMM_STATE;
 use crate::rvm::RvmResult;
 
@@ -10,11 +12,11 @@ pub struct Guest {
 }
 
 impl Guest {
-    pub fn new(phsy_mem_size: usize) -> RvmResult<Self> {
+    pub fn new(phsy_mem_size: usize) -> RvmResult<Box<Self>> {
         VMM_STATE.lock().alloc()?;
-        Ok(Self {
+        Ok(Box::new(Self {
             _phsy_mem_size: phsy_mem_size,
-        })
+        }))
     }
 }
 

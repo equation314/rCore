@@ -1,5 +1,5 @@
 use lazy_static::lazy_static;
-use x86_64::structures::idt::*;
+use x86_64::structures::{idt::*, DescriptorTablePointer};
 
 pub fn init() {
     IDT.load();
@@ -42,4 +42,12 @@ extern "C" {
     /// 符号定义在 [trap.asm](boot/trap.asm)
     //noinspection RsStaticConstNaming
     static __vectors: [extern "C" fn(); 256];
+}
+
+/// Get current IDT register
+#[inline]
+pub unsafe fn sidt() -> DescriptorTablePointer {
+    let mut idt = DescriptorTablePointer { limit: 0, base: 0 };
+    asm!("sidt ($0)" :: "r" (&mut idt) : "memory" : "volatile");
+    idt
 }
