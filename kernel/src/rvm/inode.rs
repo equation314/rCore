@@ -133,7 +133,7 @@ impl RvmINode {
     }
 
     fn get_free_vmid(&self) -> usize {
-        (0..).find(|i| !self.guests.read().contains_key(i)).unwrap()
+        (1..).find(|i| !self.guests.read().contains_key(i)).unwrap()
     }
 
     fn add_guest(&self, guest: Box<Guest>) -> usize {
@@ -143,7 +143,7 @@ impl RvmINode {
     }
 
     fn get_free_vpid(&self) -> usize {
-        (0..).find(|i| !self.vcpus.read().contains_key(i)).unwrap()
+        (1..).find(|i| !self.vcpus.read().contains_key(i)).unwrap()
     }
 
     fn add_vcpu(&self, vcpu: Box<Vcpu>) -> usize {

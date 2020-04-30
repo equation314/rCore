@@ -3,7 +3,7 @@
 use alloc::{boxed::Box, sync::Weak};
 use x86_64::{
     instructions::vmx,
-    registers::control::{Cr0, Cr3, Cr4},
+    registers::control::{Cr0, Cr0Flags, Cr3, Cr4, Cr4Flags},
 };
 
 use super::{
@@ -142,6 +142,7 @@ impl Vcpu {
     unsafe fn init_vmcs_host(&self, vmcs: &mut AutoVmcs) -> RvmResult<()> {
         vmcs.write64(VmcsField64::HOST_IA32_PAT, Msr::new(MSR_IA32_EFER).read());
         vmcs.write64(VmcsField64::HOST_IA32_EFER, Msr::new(MSR_IA32_EFER).read());
+
         vmcs.writeXX(VmcsFieldXX::HOST_CR0, Cr0::read_raw() as usize);
         let cr3 = Cr3::read();
         vmcs.writeXX(
@@ -149,6 +150,7 @@ impl Vcpu {
             (cr3.0.start_address().as_u64() | cr3.1.bits()) as usize,
         );
         vmcs.writeXX(VmcsFieldXX::HOST_CR4, Cr4::read_raw() as usize);
+
         vmcs.write16(VmcsField16::HOST_ES_SELECTOR, 0);
         vmcs.write16(VmcsField16::HOST_CS_SELECTOR, gdt::KCODE_SELECTOR.0);
         vmcs.write16(VmcsField16::HOST_SS_SELECTOR, gdt::KDATA_SELECTOR.0);
@@ -156,6 +158,7 @@ impl Vcpu {
         vmcs.write16(VmcsField16::HOST_FS_SELECTOR, 0);
         vmcs.write16(VmcsField16::HOST_GS_SELECTOR, 0);
         vmcs.write16(VmcsField16::HOST_TR_SELECTOR, gdt::TSS_SELECTOR.0);
+
         vmcs.writeXX(
             VmcsFieldXX::HOST_FS_BASE,
             Msr::new(MSR_IA32_FS_BASE).read() as usize,
@@ -167,35 +170,119 @@ impl Vcpu {
         vmcs.writeXX(VmcsFieldXX::HOST_TR_BASE, gdt::Cpu::current().tss_base());
         vmcs.writeXX(VmcsFieldXX::HOST_GDTR_BASE, gdt::sgdt().base as usize);
         vmcs.writeXX(VmcsFieldXX::HOST_IDTR_BASE, idt::sidt().base as usize);
+
         vmcs.writeXX(VmcsFieldXX::HOST_IA32_SYSENTER_ESP, 0);
         vmcs.writeXX(VmcsFieldXX::HOST_IA32_SYSENTER_EIP, 0);
         vmcs.write32(VmcsField32::HOST_IA32_SYSENTER_CS, 0);
+
         vmcs.writeXX(VmcsFieldXX::HOST_RSP, &self.vmx_state as *const _ as usize);
         vmcs.writeXX(VmcsFieldXX::HOST_RIP, 0); // TODO: vm exit entry
         Ok(())
     }
 
     /// Setup VMCS guest state.
-    unsafe fn init_vmcs_guest(&self, _vmcs: &mut AutoVmcs, _entry: u64) -> RvmResult<()> {
+    unsafe fn init_vmcs_guest(&self, vmcs: &mut AutoVmcs, _entry: u64) -> RvmResult<()> {
+        vmcs.write64(VmcsField64::GUEST_IA32_PAT, Msr::new(MSR_IA32_PAT).read());
+        vmcs.write64(VmcsField64::GUEST_IA32_EFER, Msr::new(MSR_IA32_EFER).read()); // TODO: Disable LME/LMA?
+
+        vmcs.writeXX(VmcsFieldXX::GUEST_CR3, 0);
+        let cr0 = Cr0Flags::NUMERIC_ERROR.bits() as usize;
+        vmcs.writeXX(VmcsFieldXX::GUEST_CR0, cr0);
+        // Ensure that CR0.NE remains set by masking and manually handling writes to CR0 that unset it.
+        vmcs.writeXX(VmcsFieldXX::CR0_GUEST_HOST_MASK, cr0);
+        vmcs.writeXX(VmcsFieldXX::CR0_READ_SHADOW, cr0);
+        let cr4 = Cr4Flags::VIRTUAL_MACHINE_EXTENSIONS.bits() as usize;
+        vmcs.writeXX(VmcsFieldXX::GUEST_CR4, cr4);
+        // For now, the guest can own all of the CR4 bits except VMXE, which it shouldn't touch.
+        vmcs.writeXX(VmcsFieldXX::CR4_GUEST_HOST_MASK, cr4);
+        vmcs.writeXX(VmcsFieldXX::CR4_READ_SHADOW, 0);
+
+        let default_rights = GuestRegisterAccessRights::default().bits();
+        let cs_rights = default_rights | GuestRegisterAccessRights::EXECUTABLE.bits();
+
+        // Setup CS and entry point. Use CS to set the entry point on APs.
+        vmcs.write16(VmcsField16::GUEST_CS_SELECTOR, 0xf000);
+        vmcs.writeXX(VmcsFieldXX::GUEST_CS_BASE, 0xffff_0000);
+        vmcs.write32(VmcsField32::GUEST_CS_LIMIT, 0xffff);
+        vmcs.write32(VmcsField32::GUEST_CS_AR_BYTES, cs_rights);
+        vmcs.writeXX(VmcsFieldXX::GUEST_RIP, 0x0000_fff0);
+
+        // Setup DS, ES, FS, GS, TR, LDTR, GDTR, IDTR.
+        vmcs.write16(VmcsField16::GUEST_DS_SELECTOR, 0);
+        vmcs.writeXX(VmcsFieldXX::GUEST_DS_BASE, 0);
+        vmcs.write32(VmcsField32::GUEST_DS_LIMIT, 0xffff);
+        vmcs.write32(VmcsField32::GUEST_DS_AR_BYTES, default_rights);
+        vmcs.write16(VmcsField16::GUEST_ES_SELECTOR, 0);
+        vmcs.writeXX(VmcsFieldXX::GUEST_ES_BASE, 0);
+        vmcs.write32(VmcsField32::GUEST_ES_LIMIT, 0xffff);
+        vmcs.write32(VmcsField32::GUEST_ES_AR_BYTES, default_rights);
+        vmcs.write16(VmcsField16::GUEST_FS_SELECTOR, 0);
+        vmcs.writeXX(VmcsFieldXX::GUEST_FS_BASE, 0);
+        vmcs.write32(VmcsField32::GUEST_FS_LIMIT, 0xffff);
+        vmcs.write32(VmcsField32::GUEST_FS_AR_BYTES, default_rights);
+        vmcs.write16(VmcsField16::GUEST_GS_SELECTOR, 0);
+        vmcs.writeXX(VmcsFieldXX::GUEST_GS_BASE, 0);
+        vmcs.write32(VmcsField32::GUEST_GS_LIMIT, 0xffff);
+        vmcs.write32(VmcsField32::GUEST_GS_AR_BYTES, default_rights);
+        vmcs.write16(VmcsField16::GUEST_TR_SELECTOR, 0);
+        vmcs.writeXX(VmcsFieldXX::GUEST_TR_BASE, 0);
+        vmcs.write32(VmcsField32::GUEST_TR_LIMIT, 0xffff);
+        vmcs.write32(
+            VmcsField32::GUEST_TR_AR_BYTES,
+            (GuestRegisterAccessRights::TSS_BUSY | GuestRegisterAccessRights::PRESENT).bits(),
+        );
+        vmcs.write16(VmcsField16::GUEST_LDTR_SELECTOR, 0);
+        vmcs.writeXX(VmcsFieldXX::GUEST_LDTR_BASE, 0);
+        vmcs.write32(VmcsField32::GUEST_LDTR_LIMIT, 0xffff);
+        vmcs.write32(
+            VmcsField32::GUEST_LDTR_AR_BYTES,
+            (GuestRegisterAccessRights::WRITABLE | GuestRegisterAccessRights::PRESENT).bits(),
+        );
+        vmcs.writeXX(VmcsFieldXX::GUEST_GDTR_BASE, 0);
+        vmcs.write32(VmcsField32::GUEST_GDTR_LIMIT, 0xffff);
+        vmcs.writeXX(VmcsFieldXX::GUEST_IDTR_BASE, 0);
+        vmcs.write32(VmcsField32::GUEST_IDTR_LIMIT, 0xffff);
+
+        vmcs.writeXX(VmcsFieldXX::GUEST_RSP, 0);
+        // Set all reserved RFLAGS bits to their correct values
+        vmcs.writeXX(VmcsFieldXX::GUEST_RFLAGS, 0x2);
+
+        vmcs.write32(VmcsField32::GUEST_INTERRUPTIBILITY_STATE, 0);
+        vmcs.write32(VmcsField32::GUEST_ACTIVITY_STATE, 0);
+        vmcs.writeXX(VmcsFieldXX::GUEST_PENDING_DBG_EXCEPTIONS, 0);
+
+        // From Volume 3, Section 26.3.1.1: The IA32_SYSENTER_ESP field and the
+        // IA32_SYSENTER_EIP field must each contain a canonical address.
+        vmcs.writeXX(VmcsFieldXX::GUEST_IA32_SYSENTER_ESP, 0);
+        vmcs.writeXX(VmcsFieldXX::GUEST_IA32_SYSENTER_EIP, 0);
+        vmcs.write32(VmcsField32::GUEST_IA32_SYSENTER_CS, 0);
+
+        // From Volume 3, Section 24.4.2: If the “VMCS shadowing” VM-execution
+        // control is 1, the VMREAD and VMWRITE instructions access the VMCS
+        // referenced by this pointer (see Section 24.10). Otherwise, software
+        // should set this field to FFFFFFFF_FFFFFFFFH to avoid VM-entry
+        // failures (see Section 26.3.1.5).
+        vmcs.write64(VmcsField64::VMCS_LINK_POINTER, u64::MAX);
+
         Ok(())
     }
 
     /// Setup VMCS control fields.
     unsafe fn init_vmcs_control(&self, vmcs: &mut AutoVmcs) -> RvmResult<()> {
+        use CpuBasedVmExecControls as CpuCtrl;
         use PinBasedVmExecControls as PinCtrl;
-        use ProcBasedVmExecControls as ProcCtrl;
-        use ProcBasedVmExecControls2 as ProcCtrl2;
+        use SecondaryCpuBasedVmExecControls as CpuCtrl2;
 
         // Setup secondary processor-based VMCS controls.
         vmcs.set_control(
             VmcsField32::SECONDARY_VM_EXEC_CONTROL,
             Msr::new(MSR_IA32_VMX_PROCBASED_CTLS2).read(),
             0,
-            (ProcCtrl2::EPT
-                | ProcCtrl2::RDTSCP
-                | ProcCtrl2::VIRTUAL_X2APIC
-                | ProcCtrl2::VPID
-                | ProcCtrl2::UNRESTRICTED_GUEST)
+            (CpuCtrl2::EPT
+                | CpuCtrl2::RDTSCP
+                | CpuCtrl2::VIRTUAL_X2APIC
+                | CpuCtrl2::VPID
+                | CpuCtrl2::UNRESTRICTED_GUEST)
                 .bits(),
             0,
         )?;
@@ -204,7 +291,7 @@ impl Vcpu {
             VmcsField32::SECONDARY_VM_EXEC_CONTROL,
             Msr::new(MSR_IA32_VMX_PROCBASED_CTLS2).read(),
             vmcs.read32(VmcsField32::SECONDARY_VM_EXEC_CONTROL) as u64,
-            ProcCtrl2::INVPCID.bits(),
+            CpuCtrl2::INVPCID.bits(),
             0,
         )
         .ok();
@@ -224,18 +311,18 @@ impl Vcpu {
             Msr::new(MSR_IA32_VMX_TRUE_PROCBASED_CTLS).read(),
             Msr::new(MSR_IA32_VMX_PROCBASED_CTLS).read(),
             // Enable XXX
-            (ProcCtrl::HLT_EXITING
-                | ProcCtrl::VIRTUAL_TPR
-                | ProcCtrl::UNCOND_IO_EXITING
-                | ProcCtrl::USE_MSR_BITMAPS
-                | ProcCtrl::PAUSE_EXITING
-                | ProcCtrl::SEC_CONTROLS)
+            (CpuCtrl::HLT_EXITING
+                | CpuCtrl::VIRTUAL_TPR
+                | CpuCtrl::UNCOND_IO_EXITING
+                | CpuCtrl::USE_MSR_BITMAPS
+                | CpuCtrl::PAUSE_EXITING
+                | CpuCtrl::SEC_CONTROLS)
                 .bits(),
             // Disable XXX
-            (ProcCtrl::CR3_LOAD_EXITING
-                | ProcCtrl::CR3_STORE_EXITING
-                | ProcCtrl::CR8_LOAD_EXITING
-                | ProcCtrl::CR8_STORE_EXITING)
+            (CpuCtrl::CR3_LOAD_EXITING
+                | CpuCtrl::CR3_STORE_EXITING
+                | CpuCtrl::CR8_LOAD_EXITING
+                | CpuCtrl::CR8_STORE_EXITING)
                 .bits(),
         )?;
         // TODO: InterruptWindowExiting?

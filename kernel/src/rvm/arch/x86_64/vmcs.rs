@@ -167,9 +167,9 @@ pub enum VmcsField32 {
     GUEST_GS_AR_BYTES = 0x0000481e,
     GUEST_LDTR_AR_BYTES = 0x00004820,
     GUEST_TR_AR_BYTES = 0x00004822,
-    GUEST_INTERRUPTIBILITY_INFO = 0x00004824,
+    GUEST_INTERRUPTIBILITY_STATE = 0x00004824,
     GUEST_ACTIVITY_STATE = 0x00004826,
-    GUEST_SYSENTER_CS = 0x0000482A,
+    GUEST_IA32_SYSENTER_CS = 0x0000482A,
     VMX_PREEMPTION_TIMER_VALUE = 0x0000482E,
     HOST_IA32_SYSENTER_CS = 0x00004c00,
 }
@@ -208,8 +208,8 @@ pub enum VmcsFieldXX {
     GUEST_RIP = 0x0000681e,
     GUEST_RFLAGS = 0x00006820,
     GUEST_PENDING_DBG_EXCEPTIONS = 0x00006822,
-    GUEST_SYSENTER_ESP = 0x00006824,
-    GUEST_SYSENTER_EIP = 0x00006826,
+    GUEST_IA32_SYSENTER_ESP = 0x00006824,
+    GUEST_IA32_SYSENTER_EIP = 0x00006826,
     HOST_CR0 = 0x00006c00,
     HOST_CR3 = 0x00006c02,
     HOST_CR4 = 0x00006c04,
@@ -242,7 +242,7 @@ bitflags! {
 
 bitflags! {
     /// Definitions of Primary Processor-Based VM-Execution Controls.
-    pub struct ProcBasedVmExecControls: u32 {
+    pub struct CpuBasedVmExecControls: u32 {
         /// VM-Exit if INTRs are unblocked in guest
         const INTR_WINDOW_EXITING   = 1 <<  2;
         /// Offset hardware TSC when read in guest
@@ -290,7 +290,7 @@ bitflags! {
 
 bitflags! {
     /// Definitions of Secondary Processor-Based VM-Execution Controls.
-    pub struct ProcBasedVmExecControls2: u32 {
+    pub struct SecondaryCpuBasedVmExecControls: u32 {
         /// Virtualize memory mapped APIC accesses
         const VIRT_APIC_ACCESSES    = 1 <<  0;
         /// Extended Page Tables, a.k.a. Two-Dimensional Paging
@@ -387,6 +387,50 @@ bitflags! {
         const PT_CONCEAL_PIP                = 1 << 17;
         const LOAD_IA32_RTIT_CTL            = 1 << 18;
         const LOAD_CET_STATE                = 1 << 20;
+    }
+}
+
+bitflags! {
+    /// Access rights for VMCS guest register states.
+    ///
+    /// The low 16 bits correspond to bits 23:8 of the upper 32 bits of a 64-bit
+    /// segment descriptor. See Volume 3, Section 24.4.1 for access rights format,
+    /// Volume 3, Section 3.4.5.1 for valid non-system selector types, Volume 3,
+    /// Section 3.5 for valid system selectors types.
+    pub struct GuestRegisterAccessRights: u32 {
+        /// Accessed flag.
+        const ACCESSED          = 1 << 0;
+        /// For data segments, this flag sets the segment as writable. For code
+        /// segments, this flag sets the segment as readable.
+        const WRITABLE          = 1 << 1;
+        /// For data segments, this flag marks a data segment as “expansion-direction”.
+        /// For code segments, this flag marks a code segment as “conforming”.
+        const CONFORMING        = 1 << 2;
+        /// This flag must be set for code segments.
+        const EXECUTABLE        = 1 << 3;
+        /// S — Descriptor type (0 = system; 1 = code or data)
+        const CODE_DATA         = 1 << 4;
+        /// P — Segment present
+        const PRESENT           = 1 << 7;
+        /// L - Reserved (except for CS) or 64-bit mode active (for CS only)
+        const LONG_MODE         = 1 << 13;
+        /// D/B — Default operation size (0 = 16-bit segment; 1 = 32-bit segment)
+        const DB                = 1 << 14;
+        /// G — Granularity
+        const GRANULARITY       = 1 << 15;
+        /// Segment unusable (0 = usable; 1 = unusable)
+        const UNUSABLE          = 1 << 16;
+
+        /// 16-bit TSS (Busy)
+        const TSS_BUSY_16       = 0b0011;
+        /// TSS (Busy) for 32/64-bit
+        const TSS_BUSY          = 0b1011;
+    }
+}
+
+impl Default for GuestRegisterAccessRights {
+    fn default() -> Self {
+        Self::ACCESSED | Self::WRITABLE | Self::CODE_DATA | Self::PRESENT
     }
 }
 
