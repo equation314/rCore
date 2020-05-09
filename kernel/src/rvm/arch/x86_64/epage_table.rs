@@ -1,13 +1,13 @@
 // ref: https://github.com/SinaKarvandi/Hypervisor-From-Scratch/blob/master/Part%204%20-%20Address%20Translation%20Using%20Extended%20Page%20Table%20(EPT)/MyHypervisorDriver/MyHypervisorDriver/EPT.h
 
+use crate::memory::phys_to_virt;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
+use rcore_memory::memory_set::handler::{FrameAllocator, MemoryHandler};
 use rcore_memory::memory_set::MemoryAttr;
-use rcore_memory::memory_set::handler::{MemoryHandler, FrameAllocator};
 use rcore_memory::paging::PageTable;
-use rcore_memory::{PhysAddr, VirtAddr};
 use rcore_memory::PAGE_SIZE;
-use crate::memory::phys_to_virt;
+use rcore_memory::{PhysAddr, VirtAddr};
 
 const MASK_PAGE_ALIGNED: usize = PAGE_SIZE - 1;
 
@@ -24,7 +24,7 @@ pub struct EPageTable<T: FrameAllocator> {
 
 impl<T: FrameAllocator> EPageTable<T> {
     /// Create a new EPageTable
-    /// 
+    ///
     /// # Arguments
     ///     * guest_physi_size:
     ///         guest os physical memory size, unit: byte, must be 4KiB aligned
@@ -35,14 +35,22 @@ impl<T: FrameAllocator> EPageTable<T> {
     ///         vmm's virtual memory start address that mapping guest's memory address,
     ///         that is, vmm can access guest's physical memory through vmm's virtual address [vmm_virt_start, vmm_virt_start + guest_physi_size)
     ///     * allocator: FrameAllocator
-    pub fn new(guest_physi_size: usize, guest_physi_start: usize, vmm_virt_start: VirtAddr, allocator: T) -> Self {
+    pub fn new(
+        guest_physi_size: usize,
+        guest_physi_start: usize,
+        vmm_virt_start: VirtAddr,
+        allocator: T,
+    ) -> Self {
         assert_eq!(guest_physi_size & MASK_PAGE_ALIGNED, 0);
         assert_eq!(guest_physi_start & MASK_PAGE_ALIGNED, 0);
         assert_eq!(vmm_virt_start & MASK_PAGE_ALIGNED, 0);
 
         let mut epage_table = Self {
-            guest_physi_size, guest_physi_start, vmm_virt_start, allocator,
-            ept_page_root: 0
+            guest_physi_size,
+            guest_physi_start,
+            vmm_virt_start,
+            allocator,
+            ept_page_root: 0,
         };
         epage_table.build();
         epage_table
@@ -71,7 +79,8 @@ impl<T: FrameAllocator> EPageTable<T> {
             }
             if !entry.is_present() {
                 let new_page = self.allocator.alloc().expect("failed to alloc frame");
-                for idx in 0..512 { // clean all entry
+                // clear all entry
+                for idx in 0..512 {
                     EPageEntry::new(new_page + idx * 8).zero();
                 }
                 entry.set_physical_address(new_page);
@@ -85,11 +94,18 @@ impl<T: FrameAllocator> EPageTable<T> {
     }
     fn build(&mut self) {
         assert_eq!(self.ept_page_root, 0);
-        self.ept_page_root = self.allocator.alloc().expect("failed to allocate ept_page_root frame");
-        for idx in 0..512 { // clean all entry
+        self.ept_page_root = self
+            .allocator
+            .alloc()
+            .expect("failed to allocate ept_page_root frame");
+        // clear all entry
+        for idx in 0..512 {
             EPageEntry::new(self.ept_page_root + idx * 8).zero();
         }
-        info!("[RVM] epage_table: successed alloc ept page root 0x{:x}", self.ept_page_root);
+        info!(
+            "[RVM] epage_table: successed alloc ept page root 0x{:x}",
+            self.ept_page_root
+        );
 
         let mut guest_mem_start = self.guest_physi_start;
         let guest_mem_end = self.guest_physi_start + self.guest_physi_size;
@@ -99,7 +115,10 @@ impl<T: FrameAllocator> EPageTable<T> {
             }
             let mut entry = self.walk(guest_mem_start);
             assert!(!entry.is_present());
-            let new_page = self.allocator.alloc().expect("failed to alloc guest memory frame");
+            let new_page = self
+                .allocator
+                .alloc()
+                .expect("failed to alloc guest memory frame");
             entry.set_physical_address(new_page);
             entry.set_read(true);
             entry.set_write(true);
@@ -151,7 +170,9 @@ impl<T: FrameAllocator> MemoryHandler for EPageTableHandler<T> {
     }
 
     fn map(&self, pt: &mut dyn PageTable, addr: VirtAddr, attr: &MemoryAttr) {
-        assert!(self.0.vmm_virt_start <= addr && addr < self.0.vmm_virt_start + self.0.guest_physi_size);
+        assert!(
+            self.0.vmm_virt_start <= addr && addr < self.0.vmm_virt_start + self.0.guest_physi_size
+        );
         let guest_pa = addr - self.0.vmm_virt_start + self.0.guest_physi_start;
         let target = self.0.walk(guest_pa).get_physical_address();
         let entry = pt.map(addr, target);
@@ -159,7 +180,9 @@ impl<T: FrameAllocator> MemoryHandler for EPageTableHandler<T> {
     }
 
     fn unmap(&self, pt: &mut dyn PageTable, addr: VirtAddr) {
-        assert!(self.0.vmm_virt_start <= addr && addr < self.0.vmm_virt_start + self.0.guest_physi_size);
+        assert!(
+            self.0.vmm_virt_start <= addr && addr < self.0.vmm_virt_start + self.0.guest_physi_size
+        );
         pt.unmap(addr);
     }
 
@@ -206,15 +229,11 @@ struct EPageEntry {
 impl EPageEntry {
     fn new(hpaaddr: PhysAddr) -> Self {
         assert_eq!(PAGE_SIZE, 4096); // TODO
-        Self {
-            hpaaddr
-        }
+        Self { hpaaddr }
     }
     fn get_value(&self) -> usize {
         let va = phys_to_virt(self.hpaaddr);
-        unsafe {
-            *(va as *const usize)
-        }
+        unsafe { *(va as *const usize) }
     }
     fn set_value(&mut self, value: usize) {
         let va = phys_to_virt(self.hpaaddr);
@@ -225,38 +244,70 @@ impl EPageEntry {
     fn get_bits(&self, s: usize, t: usize) -> usize {
         assert!(s < t && t <= 64);
         let value = self.get_value();
-        (value >> s) & ((1 << (t-s))-1)
+        (value >> s) & ((1 << (t - s)) - 1)
     }
     fn set_bits(&mut self, s: usize, t: usize, value: usize) {
         assert!(s < t && t <= 64);
-        assert!(value < (1 << (t-s)));
+        assert!(value < (1 << (t - s)));
         let old_value = self.get_value();
         self.set_value(old_value - self.get_bits(s, t) + (value << s));
     }
 
-    fn zero(&mut self) { self.set_value(0); }
-    fn is_present(&self) -> bool { self.get_physical_address() != 0 }
+    fn zero(&mut self) {
+        self.set_value(0);
+    }
+    fn is_present(&self) -> bool {
+        self.get_physical_address() != 0
+    }
 
-    fn get_read(&self) -> bool { self.get_bits(0, 1) != 0 }
-    fn set_read(&mut self, value: bool) { self.set_bits(0, 1, value as usize) }
+    fn get_read(&self) -> bool {
+        self.get_bits(0, 1) != 0
+    }
+    fn set_read(&mut self, value: bool) {
+        self.set_bits(0, 1, value as usize)
+    }
 
-    fn get_write(&self) -> bool { self.get_bits(1, 2) != 0 }
-    fn set_write(&mut self, value: bool) { self.set_bits(1, 2, value as usize) }
+    fn get_write(&self) -> bool {
+        self.get_bits(1, 2) != 0
+    }
+    fn set_write(&mut self, value: bool) {
+        self.set_bits(1, 2, value as usize)
+    }
 
-    fn get_execute(&self) -> bool { self.get_bits(2, 3) != 0 }
-    fn set_execute(&mut self, value: bool) { self.set_bits(2, 3, value as usize) }
+    fn get_execute(&self) -> bool {
+        self.get_bits(2, 3) != 0
+    }
+    fn set_execute(&mut self, value: bool) {
+        self.set_bits(2, 3, value as usize)
+    }
 
-    fn get_ept_memory_type(&self) -> usize { self.get_bits(3, 6) }
-    fn set_ept_memory_type(&mut self, value: usize) { self.set_bits(3, 6, value) }
+    fn get_ept_memory_type(&self) -> usize {
+        self.get_bits(3, 6)
+    }
+    fn set_ept_memory_type(&mut self, value: usize) {
+        self.set_bits(3, 6, value)
+    }
 
-    fn get_accessed(&self) -> bool { self.get_bits(8, 9) != 0 }
-    fn set_accessed(&mut self, value: bool) { self.set_bits(8, 9, value as usize) }
+    fn get_accessed(&self) -> bool {
+        self.get_bits(8, 9) != 0
+    }
+    fn set_accessed(&mut self, value: bool) {
+        self.set_bits(8, 9, value as usize)
+    }
 
-    fn get_dirty(&self) -> bool { self.get_bits(9, 10) != 0 }
-    fn set_dirty(&mut self, value: bool) { self.set_bits(9, 10, value as usize) }
+    fn get_dirty(&self) -> bool {
+        self.get_bits(9, 10) != 0
+    }
+    fn set_dirty(&mut self, value: bool) {
+        self.set_bits(9, 10, value as usize)
+    }
 
-    fn get_execute_for_user_mode(&self) -> bool { self.get_bits(10, 11) != 0 }
-    fn set_execute_for_user_mode(&mut self, value: bool) { self.set_bits(10, 11, value as usize) }
+    fn get_execute_for_user_mode(&self) -> bool {
+        self.get_bits(10, 11) != 0
+    }
+    fn set_execute_for_user_mode(&mut self, value: bool) {
+        self.set_bits(10, 11, value as usize)
+    }
 
     fn get_physical_address(&self) -> PhysAddr {
         self.get_bits(12, 48) << 12
@@ -270,22 +321,20 @@ impl EPageEntry {
 /*
 struct {
     UINT64 MemoryType : 3; // bit 2:0 (0 = Uncacheable (UC) - 6 = Write - back(WB))
-    UINT64 PageWalkLength : 3; // bit 5:3 (This value is 1 less than the EPT page-walk length) 
+    UINT64 PageWalkLength : 3; // bit 5:3 (This value is 1 less than the EPT page-walk length)
     UINT64 DirtyAndAceessEnabled : 1; // bit 6  (Setting this control to 1 enables accessed and dirty flags for EPT)
-    UINT64 Reserved1 : 5; // bit 11:7 
+    UINT64 Reserved1 : 5; // bit 11:7
     UINT64 PML4Address : 36;
     UINT64 Reserved2 : 16;
 }Fields;
 */
 struct EPTP {
-    value: usize
+    value: usize,
 }
 
 impl EPTP {
     fn new() -> Self {
-        Self {
-            value: 0
-        }
+        Self { value: 0 }
     }
     fn value(&self) -> usize {
         self.value
@@ -293,22 +342,34 @@ impl EPTP {
 
     fn get_bits(&self, s: usize, t: usize) -> usize {
         assert!(s < t && t <= 64);
-        (self.value >> s) & ((1 << (t-s))-1)
+        (self.value >> s) & ((1 << (t - s)) - 1)
     }
     fn set_bits(&mut self, s: usize, t: usize, value: usize) {
         assert!(s < t && t <= 64);
-        assert!(value < (1 << (t-s)));
+        assert!(value < (1 << (t - s)));
         self.value = self.value - self.get_bits(s, t) + (value << s);
     }
 
-    fn get_memory_type(&self) -> usize { self.get_bits(0, 3) }
-    fn set_memory_type(&mut self, value: usize) { self.set_bits(0, 3, value); }
+    fn get_memory_type(&self) -> usize {
+        self.get_bits(0, 3)
+    }
+    fn set_memory_type(&mut self, value: usize) {
+        self.set_bits(0, 3, value);
+    }
 
-    fn get_page_walk_length(&self) -> usize { self.get_bits(3, 6) }
-    fn set_page_walk_length(&mut self, value: usize) { self.set_bits(3, 6, value); }
+    fn get_page_walk_length(&self) -> usize {
+        self.get_bits(3, 6)
+    }
+    fn set_page_walk_length(&mut self, value: usize) {
+        self.set_bits(3, 6, value);
+    }
 
-    fn get_dirty_and_access_enabled(&self) -> bool { self.get_bits(6, 7) != 0 }
-    fn set_dirty_and_access_enabled(&mut self, value: bool) { self.set_bits(6, 7, value as usize); }
+    fn get_dirty_and_access_enabled(&self) -> bool {
+        self.get_bits(6, 7) != 0
+    }
+    fn set_dirty_and_access_enabled(&mut self, value: bool) {
+        self.set_bits(6, 7, value as usize);
+    }
 
     fn get_epage_table_root(&self) -> usize {
         self.get_bits(12, 48) << 12

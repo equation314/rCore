@@ -3,10 +3,10 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 
-use super::structs::VMM_STATE;
-use crate::rvm::RvmResult;
 use super::epage_table::EPageTable;
+use super::structs::VMM_STATE;
 use crate::memory::GlobalFrameAlloc;
+use crate::rvm::RvmResult;
 use rcore_memory::VirtAddr;
 
 /// Represents a guest within the hypervisor.
@@ -17,11 +17,14 @@ pub struct Guest {
 }
 
 impl Guest {
-    pub fn new(phsy_mem_size: usize, epage_table: Arc<Box<EPageTable<GlobalFrameAlloc>>>) -> RvmResult<Box<Self>> {
+    pub fn new(
+        phsy_mem_size: usize,
+        epage_table: Arc<Box<EPageTable<GlobalFrameAlloc>>>,
+    ) -> RvmResult<Box<Self>> {
         VMM_STATE.lock().alloc()?;
         Ok(Box::new(Self {
             _phsy_mem_size: phsy_mem_size,
-            epage_table
+            epage_table,
         }))
     }
     pub fn access_guest_memory(&self) -> VirtAddr {

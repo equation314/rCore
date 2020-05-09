@@ -9,9 +9,9 @@ use rcore_fs::vfs::*;
 use super::arch::{self, Guest, Vcpu};
 use super::arch::{EPageTable, EPageTableHandler};
 use crate::memory::copy_from_user;
-use rcore_memory::{PAGE_SIZE, memory_set::MemoryAttr};
 use crate::memory::GlobalFrameAlloc;
 use crate::process::current_thread;
+use rcore_memory::{memory_set::MemoryAttr, PAGE_SIZE};
 
 const MAX_GUEST_NUM: usize = 64;
 const MAX_VCPU_NUM: usize = 64;
@@ -80,7 +80,12 @@ impl INode for RvmINode {
                     let thread = unsafe { current_thread() };
                     let vmm_vaddr = thread.vm.lock().find_free_area(PAGE_SIZE, phsy_mem_size);
                     info!("[RVM] vmm vaddr for vmid {} is 0x{:x}", vmid, vmm_vaddr);
-                    let epage_table = Arc::new(Box::new(EPageTable::new(phsy_mem_size, 0, vmm_vaddr, GlobalFrameAlloc)));
+                    let epage_table = Arc::new(Box::new(EPageTable::new(
+                        phsy_mem_size,
+                        0,
+                        vmm_vaddr,
+                        GlobalFrameAlloc,
+                    )));
 
                     let mut guest = Guest::new(phsy_mem_size, Arc::clone(&epage_table))?;
                     assert!(self.add_guest(guest) == vmid);
