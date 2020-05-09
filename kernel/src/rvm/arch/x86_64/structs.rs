@@ -217,6 +217,7 @@ impl VmmState {
                 warn!("[RVM] failed to turn on VMX on CPU {}", cpu_num);
                 return Err(RvmError::DeviceError);
             }
+            info!("[RVM] successed to turn on VMX on CPU {}", cpu_num);
         }
 
         Ok(())

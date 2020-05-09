@@ -7,13 +7,18 @@ use spin::RwLock;
 use rcore_fs::vfs::*;
 
 use super::arch::{self, Guest, Vcpu};
+use super::arch::{EPageTable, EPageTableHandler};
 use crate::memory::copy_from_user;
+use rcore_memory::{PAGE_SIZE, memory_set::MemoryAttr};
+use crate::memory::GlobalFrameAlloc;
+use crate::process::current_thread;
 
 const MAX_GUEST_NUM: usize = 64;
 const MAX_VCPU_NUM: usize = 64;
 
 const RVM_IO: u32 = 0xAE00;
 const RVM_GUEST_CREATE: u32 = RVM_IO + 0x01;
+const RVM_GUEST_ACCESS_MEMORY: u32 = RVM_IO + 0x02; // get address to access guest's memory
 const RVM_VCPU_CREATE: u32 = RVM_IO + 0x11;
 const RVM_VCPU_RESUME: u32 = RVM_IO + 0x12;
 
@@ -69,15 +74,39 @@ impl INode for RvmINode {
                 if arch::check_hypervisor_feature() {
                     let vmid = self.get_free_vmid();
                     if vmid >= MAX_GUEST_NUM {
-                        warn!("[RVM] to many guests ({})", MAX_GUEST_NUM);
+                        warn!("[RVM] too many guests ({})", MAX_GUEST_NUM);
                         return Err(FsError::NoDeviceSpace);
                     }
-                    let guest = Guest::new(phsy_mem_size)?;
+                    let thread = unsafe { current_thread() };
+                    let vmm_vaddr = thread.vm.lock().find_free_area(PAGE_SIZE, phsy_mem_size);
+                    info!("[RVM] vmm vaddr for vmid {} is 0x{:x}", vmid, vmm_vaddr);
+                    let epage_table = Arc::new(Box::new(EPageTable::new(phsy_mem_size, 0, vmm_vaddr, GlobalFrameAlloc)));
+
+                    let mut guest = Guest::new(phsy_mem_size, Arc::clone(&epage_table))?;
                     assert!(self.add_guest(guest) == vmid);
+
+                    let handler = EPageTableHandler::new(Arc::clone(&epage_table));
+                    thread.vm.lock().push(
+                        vmm_vaddr,
+                        vmm_vaddr + phsy_mem_size,
+                        MemoryAttr::default().user().writable(),
+                        handler,
+                        "vmm_guest_physical",
+                    );
+
                     Ok(vmid)
                 } else {
                     warn!("[RVM] no hardware support");
                     Err(FsError::NotSupported)
+                }
+            }
+            RVM_GUEST_ACCESS_MEMORY => {
+                let vmid = data;
+                info!("[RVM] ioctl RVM_GUEST_ACCESS_MEMORY {:x?}", vmid);
+                if let Some(guest) = self.guests.read().get(&vmid) {
+                    Ok(guest.access_guest_memory())
+                } else {
+                    Err(FsError::InvalidParam)
                 }
             }
             RVM_VCPU_CREATE => {
@@ -88,7 +117,7 @@ impl INode for RvmINode {
                 if let Some(guest) = self.guests.read().get(&vmid) {
                     let vpid = self.get_free_vpid();
                     if vpid >= MAX_VCPU_NUM {
-                        warn!("[RVM] to many vcpus ({})", MAX_VCPU_NUM);
+                        warn!("[RVM] too many vcpus ({})", MAX_VCPU_NUM);
                         return Err(FsError::NoDeviceSpace);
                     }
                     let mut vcpu = Vcpu::new(vpid as u16, Arc::downgrade(guest))?;
