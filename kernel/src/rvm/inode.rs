@@ -137,7 +137,7 @@ impl INode for RvmINode {
                 let vpid = data;
                 info!("[RVM] ioctl RVM_VCPU_RESUME {:#x}", vpid);
                 if let Some(vcpu) = self.vcpus.write().get_mut(&vpid) {
-                    vcpu.resume();
+                    vcpu.resume()?;
                     Ok(0)
                 } else {
                     Err(FsError::InvalidParam)

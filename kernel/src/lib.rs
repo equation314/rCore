@@ -19,6 +19,8 @@ extern crate alloc;
 extern crate log;
 #[macro_use]
 extern crate lazy_static;
+#[macro_use]
+extern crate memoffset;
 extern crate rlibc;
 
 pub use crate::process::{new_kernel_context, processor};

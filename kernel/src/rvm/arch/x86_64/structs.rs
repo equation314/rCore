@@ -182,17 +182,16 @@ impl VmmState {
         let ctrl = FeatureControl::read();
         let locked = ctrl.contains(FeatureControlFlags::LOCKED);
         let vmxon_outside = ctrl.contains(FeatureControlFlags::VMXON_ENABLED_OUTSIDE_SMX);
-        if locked && !vmxon_outside {
-            warn!("[RVM] disabled by BIOS");
-            return Err(RvmError::NotSupported);
-        }
-        if !locked || !vmxon_outside {
+        if !locked {
             unsafe {
                 FeatureControl::write(
                     ctrl | FeatureControlFlags::LOCKED
                         | FeatureControlFlags::VMXON_ENABLED_OUTSIDE_SMX,
                 )
             };
+        } else if !vmxon_outside {
+            warn!("[RVM] disabled by BIOS");
+            return Err(RvmError::NotSupported);
         }
 
         // Check control registers are in a VMX-friendly state.

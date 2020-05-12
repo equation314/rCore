@@ -1,5 +1,7 @@
 // ref: https://github.com/SinaKarvandi/Hypervisor-From-Scratch/blob/master/Part%204%20-%20Address%20Translation%20Using%20Extended%20Page%20Table%20(EPT)/MyHypervisorDriver/MyHypervisorDriver/EPT.h
 
+#![allow(dead_code)]
+
 use crate::memory::phys_to_virt;
 use alloc::boxed::Box;
 use alloc::sync::Arc;

@@ -27,8 +27,13 @@ impl Guest {
             epage_table,
         }))
     }
+
     pub fn access_guest_memory(&self) -> VirtAddr {
         self.epage_table.vmm_vaddr()
+    }
+
+    pub fn eptp(&self) -> usize {
+        self.epage_table.eptp()
     }
 }
 

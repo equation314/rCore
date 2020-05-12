@@ -74,12 +74,13 @@ rcore-fs-ramfs = { git = "https://github.com/rcore-os/rcore-fs", rev = "7e7c74a"
 rcore-fs-mountfs = { git = "https://github.com/rcore-os/rcore-fs", rev = "7e7c74a" }
 rcore-fs-devfs = { git = "https://github.com/rcore-os/rcore-fs", rev = "7e7c74a" }
 compression = { version = "0.1.4", default-features = false, features = ["gzip"] }
+memoffset = { version = "0.5"}
 
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 rboot = { path = "../rboot", default-features = false }
 apic = { git = "https://github.com/rcore-os/apic-rs" }
-x86_64 = { git = "https://github.com/equation314/x86_64", rev = "6a63680" }
+x86_64 = { git = "https://github.com/equation314/x86_64", rev = "4ad4551" }
 raw-cpuid = "7.0"
 uart_16550 = "0.2"
 pc-keyboard = "0.5"

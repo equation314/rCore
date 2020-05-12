@@ -1,6 +1,7 @@
 //! The virtual CPU within a guest.
 
 use alloc::{boxed::Box, sync::Weak};
+use core::sync::atomic::{AtomicBool, Ordering};
 use x86_64::{
     instructions::vmx,
     registers::control::{Cr0, Cr0Flags, Cr3, Cr4, Cr4Flags},
@@ -67,6 +68,7 @@ struct GuestState {
 }
 
 /// Host and guest cpu register states.
+#[repr(C)]
 #[derive(Debug, Default)]
 struct VmxState {
     resume: bool,
@@ -78,7 +80,8 @@ struct VmxState {
 #[derive(Debug)]
 pub struct Vcpu {
     vpid: u16,
-    _guest: Weak<Box<Guest>>,
+    guest: Weak<Box<Guest>>,
+    running: AtomicBool,
     vmx_state: VmxState,
     vmcs_page: VmxPage,
     host_msr_list: MsrList,
@@ -97,15 +100,14 @@ impl Vcpu {
 
         Ok(Box::new(Self {
             vpid,
-            _guest: guest,
+            guest,
+            running: AtomicBool::new(false),
             vmx_state: VmxState::default(),
             vmcs_page,
             host_msr_list,
             guest_msr_list,
         }))
     }
-
-    pub fn resume(&mut self) {}
 
     pub fn init(&mut self, entry: u64) -> RvmResult<()> {
         unsafe {
@@ -397,12 +399,17 @@ impl Vcpu {
         // treated as guest-physical addresses. Guest-physical addresses are
         // translated by traversing a set of EPT paging structures to produce
         // physical addresses that are used to access memory.
-        vmcs.write64(VmcsField64::EPT_POINTER, 0); // TODO: eptp
+        let eptp = self
+            .guest
+            .upgrade()
+            .expect("[RVM] cannot get guest for vcpu")
+            .eptp() as u64;
+        vmcs.write64(VmcsField64::EPT_POINTER, eptp);
 
         // From Volume 3, Section 28.3.3.4: Software can use an INVEPT with type all
         // ALL_CONTEXT to prevent undesired retention of cached EPT information. Here,
         // we only care about invalidating information associated with this EPTP.
-        vmx::invept(vmx::InvEptType::SingleContext, 0); // TODO: eptp
+        vmx::invept(vmx::InvEptType::SingleContext, eptp);
 
         // Setup MSR handling.
         vmcs.write64(VmcsField64::MSR_BITMAP, 0); // TODO: msr_bitmap_addr
@@ -434,6 +441,30 @@ impl Vcpu {
 
         Ok(())
     }
+
+    pub fn resume(&mut self) -> RvmResult<()> {
+        loop {
+            let vmcs = AutoVmcs::new(self.vmcs_page.phys_addr())?;
+
+            // TODO: interrupt virtualization
+            // TODO: save/restore guest extended registers (x87/SSE)
+
+            // VM Entry
+            self.running.store(true, Ordering::SeqCst);
+            let res = unsafe { vmx_entry(&mut self.vmx_state) };
+            self.running.store(false, Ordering::SeqCst);
+
+            if res.is_err() {
+                warn!(
+                    "[RVM] VCPU resume faild: {:#x}",
+                    vmcs.read32(VmcsField32::VM_INSTRUCTION_ERROR)
+                );
+                return res;
+            }
+
+            // VM Exit
+        }
+    }
 }
 
 impl Drop for Vcpu {
@@ -442,4 +473,96 @@ impl Drop for Vcpu {
         // TODO pin thread
         unsafe { vmx::vmclear(self.vmcs_page.phys_addr()) };
     }
+}
+
+#[naked]
+#[inline(never)]
+unsafe fn vmx_entry(state: &mut VmxState) -> RvmResult<()> {
+    let host_off = offset_of!(VmxState, host_state);
+    let guest_off = offset_of!(VmxState, guest_state);
+    asm!("
+    // Store host callee save registers, return address, and processor flags.
+    pop     qword ptr [rdi + $0] // rip
+    mov     [rdi + $1], rbx
+    mov     [rdi + $2], rsp
+    mov     [rdi + $3], rbp
+    mov     [rdi + $4], r12
+    mov     [rdi + $5], r13
+    mov     [rdi + $6], r14
+    mov     [rdi + $7], r15
+    pushf
+    pop     qword ptr [rdi + $8] // rflags
+
+    // We are going to trample RDI, so move it to RSP.
+    mov     rsp, rdi
+
+    // Load the guest registers not covered by the VMCS.
+    mov     rax, [rsp + $9]
+    mov     cr2, rax
+    mov     rax, [rsp + $10]
+    mov     rcx, [rsp + $11]
+    mov     rdx, [rsp + $12]
+    mov     rbx, [rsp + $13]
+    mov     rbp, [rsp + $14]
+    mov     rsi, [rsp + $15]
+    mov     rdi, [rsp + $16]
+    mov     r8, [rsp + $17]
+    mov     r9, [rsp + $18]
+    mov     r10, [rsp + $19]
+    mov     r11, [rsp + $20]
+    mov     r12, [rsp + $21]
+    mov     r13, [rsp + $22]
+    mov     r14, [rsp + $23]
+    mov     r15, [rsp + $24]
+
+    // Check if vmlaunch or vmresume is needed
+    cmp     byte ptr [rsp + $25], 0
+    jne     1f
+    vmlaunch
+    jmp     2f
+1:  vmresume
+2:
+
+    // We will only be here if vmlaunch or vmresume failed.
+    // Restore host RDI, RSP and return address.
+    mov     rdi, rsp
+    mov     rsp, [rdi + $2]
+    push    qword ptr [rdi + $0]
+"
+    :
+    : "i" (host_off + offset_of!(HostState, rip)),
+      "i" (host_off + offset_of!(HostState, rbx)),
+      "i" (host_off + offset_of!(HostState, rsp)),
+      "i" (host_off + offset_of!(HostState, rbp)),
+      "i" (host_off + offset_of!(HostState, r12)),
+      "i" (host_off + offset_of!(HostState, r13)),
+      "i" (host_off + offset_of!(HostState, r14)),
+      "i" (host_off + offset_of!(HostState, r15)),
+      "i" (host_off + offset_of!(HostState, rflags)),
+
+      "i" (guest_off + offset_of!(GuestState, cr2)),
+      "i" (guest_off + offset_of!(GuestState, rax)),
+      "i" (guest_off + offset_of!(GuestState, rcx)),
+      "i" (guest_off + offset_of!(GuestState, rdx)),
+      "i" (guest_off + offset_of!(GuestState, rbx)),
+      "i" (guest_off + offset_of!(GuestState, rbp)),
+      "i" (guest_off + offset_of!(GuestState, rsi)),
+      "i" (guest_off + offset_of!(GuestState, rdi)),
+      "i" (guest_off + offset_of!(GuestState, r8)),
+      "i" (guest_off + offset_of!(GuestState, r9)),
+      "i" (guest_off + offset_of!(GuestState, r10)),
+      "i" (guest_off + offset_of!(GuestState, r11)),
+      "i" (guest_off + offset_of!(GuestState, r12)),
+      "i" (guest_off + offset_of!(GuestState, r13)),
+      "i" (guest_off + offset_of!(GuestState, r14)),
+      "i" (guest_off + offset_of!(GuestState, r15)),
+
+      "i" (offset_of!(VmxState, resume))
+    : "cc", "memory",
+      "rax", "rbx", "rcx", "rdx", "rdi", "rsi"
+      "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"
+    : "intel", "volatile");
+
+    // We will only be here if vmlaunch or vmresume failed.
+    Err(RvmError::DeviceError)
 }
