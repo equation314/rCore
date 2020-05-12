@@ -11,6 +11,7 @@ use super::{
     msr::*,
     structs::{MsrList, VmxPage},
     vmcs::*,
+    vmexit::vmexit_handler,
     Guest,
 };
 use crate::arch::{gdt, idt};
@@ -42,7 +43,7 @@ struct HostState {
 /// Holds the register state used to restore a guest.
 #[repr(C)]
 #[derive(Debug, Default)]
-struct GuestState {
+pub struct GuestState {
     //  RIP, RSP, and RFLAGS are automatically saved by VMX in the VMCS.
     rax: u64,
     rcx: u64,
@@ -178,7 +179,7 @@ impl Vcpu {
         vmcs.write32(VmcsField32::HOST_IA32_SYSENTER_CS, 0);
 
         vmcs.writeXX(VmcsFieldXX::HOST_RSP, &self.vmx_state as *const _ as usize);
-        vmcs.writeXX(VmcsFieldXX::HOST_RIP, 0); // TODO: vm exit entry
+        vmcs.writeXX(VmcsFieldXX::HOST_RIP, vmx_exit as usize);
         Ok(())
     }
 
@@ -444,7 +445,7 @@ impl Vcpu {
 
     pub fn resume(&mut self) -> RvmResult<()> {
         loop {
-            let vmcs = AutoVmcs::new(self.vmcs_page.phys_addr())?;
+            let mut vmcs = AutoVmcs::new(self.vmcs_page.phys_addr())?;
 
             // TODO: interrupt virtualization
             // TODO: save/restore guest extended registers (x87/SSE)
@@ -463,6 +464,11 @@ impl Vcpu {
             }
 
             // VM Exit
+            self.vmx_state.resume = true;
+            if vmexit_handler(&mut vmcs, &self.vmx_state.guest_state)? {
+                // forward to user mode handler
+                return Ok(());
+            }
         }
     }
 }
@@ -477,7 +483,7 @@ impl Drop for Vcpu {
 
 #[naked]
 #[inline(never)]
-unsafe fn vmx_entry(state: &mut VmxState) -> RvmResult<()> {
+unsafe fn vmx_entry(_vmx_state: &mut VmxState) -> RvmResult<()> {
     let host_off = offset_of!(VmxState, host_state);
     let guest_off = offset_of!(VmxState, guest_state);
     asm!("
@@ -565,4 +571,86 @@ unsafe fn vmx_entry(state: &mut VmxState) -> RvmResult<()> {
 
     // We will only be here if vmlaunch or vmresume failed.
     Err(RvmError::DeviceError)
+}
+
+/// This is effectively the second-half of vmx_entry. When we return from a
+/// VM exit, vmx_state argument is stored in RSP. We use this to restore the
+/// stack and registers to the state they were in when vmx_entry was called.
+#[naked]
+#[inline(never)]
+unsafe fn vmx_exit(_vmx_state: &mut VmxState) -> RvmResult<()> {
+    let host_off = offset_of!(VmxState, host_state);
+    let guest_off = offset_of!(VmxState, guest_state);
+    asm!("
+    // Store the guest registers not covered by the VMCS. At this point,
+    // vmx_state is in RSP.
+    mov     [rsp + $10], rax
+    mov     [rsp + $11], rcx
+    mov     [rsp + $12], rdx
+    mov     [rsp + $13], rbx
+    mov     [rsp + $14], rbp
+    mov     [rsp + $15], rsi
+    mov     [rsp + $16], rdi
+    mov     [rsp + $17], r8
+    mov     [rsp + $18], r9
+    mov     [rsp + $19], r10
+    mov     [rsp + $20], r11
+    mov     [rsp + $21], r12
+    mov     [rsp + $22], r13
+    mov     [rsp + $23], r14
+    mov     [rsp + $24], r15
+    mov     rax, cr2
+    mov     [rsp + $9], rax
+
+    // Load vmx_state from RSP into RDI.
+    mov     rdi, rsp
+
+    // Load host callee save registers, return address, and processor flags.
+
+    mov     rbx, [rdi + $1]
+    mov     rsp, [rdi + $2]
+    mov     rbp, [rdi + $3]
+    mov     r12, [rdi + $4]
+    mov     r13, [rdi + $5]
+    mov     r14, [rdi + $6]
+    mov     r15, [rdi + $7]
+    push    qword ptr [rdi + $8] // rflags
+    popf
+    push    qword ptr [rdi + $0] // rip
+"
+    :
+    : "i" (host_off + offset_of!(HostState, rip)),
+      "i" (host_off + offset_of!(HostState, rbx)),
+      "i" (host_off + offset_of!(HostState, rsp)),
+      "i" (host_off + offset_of!(HostState, rbp)),
+      "i" (host_off + offset_of!(HostState, r12)),
+      "i" (host_off + offset_of!(HostState, r13)),
+      "i" (host_off + offset_of!(HostState, r14)),
+      "i" (host_off + offset_of!(HostState, r15)),
+      "i" (host_off + offset_of!(HostState, rflags)),
+
+      "i" (guest_off + offset_of!(GuestState, cr2)),
+      "i" (guest_off + offset_of!(GuestState, rax)),
+      "i" (guest_off + offset_of!(GuestState, rcx)),
+      "i" (guest_off + offset_of!(GuestState, rdx)),
+      "i" (guest_off + offset_of!(GuestState, rbx)),
+      "i" (guest_off + offset_of!(GuestState, rbp)),
+      "i" (guest_off + offset_of!(GuestState, rsi)),
+      "i" (guest_off + offset_of!(GuestState, rdi)),
+      "i" (guest_off + offset_of!(GuestState, r8)),
+      "i" (guest_off + offset_of!(GuestState, r9)),
+      "i" (guest_off + offset_of!(GuestState, r10)),
+      "i" (guest_off + offset_of!(GuestState, r11)),
+      "i" (guest_off + offset_of!(GuestState, r12)),
+      "i" (guest_off + offset_of!(GuestState, r13)),
+      "i" (guest_off + offset_of!(GuestState, r14)),
+      "i" (guest_off + offset_of!(GuestState, r15)),
+
+      "i" (offset_of!(VmxState, resume))
+    : "cc", "memory",
+      "rax", "rbx", "rcx", "rdx", "rdi", "rsi"
+      "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"
+    : "intel", "volatile");
+
+    Ok(())
 }

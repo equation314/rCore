@@ -6,6 +6,7 @@ mod msr;
 mod structs;
 mod vcpu;
 mod vmcs;
+mod vmexit;
 
 pub use epage_table::{EPageTable, EPageTableHandler};
 pub use guest::Guest;
