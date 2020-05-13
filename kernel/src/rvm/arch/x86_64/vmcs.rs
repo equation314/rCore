@@ -449,6 +449,7 @@ impl AutoVmcs {
                 interrupt::restore(interrupt_flags);
                 Err(RvmError::DeviceError)
             } else {
+                info!("[RVM] interrupts disabled");
                 Ok(Self {
                     vmcs_paddr: phys_addr.as_u64(),
                     interrupt_flags,
@@ -542,7 +543,7 @@ impl AutoVmcs {
         debug_assert!(self.vmcs_paddr != 0);
         unsafe {
             vmx::vmread(field).unwrap_or_else(|| {
-                panic!("[RVM]: vmread error: field={:#x}", field);
+                panic!("[RVM] vmread error: field={:#x}", field);
             })
         }
     }
@@ -553,7 +554,7 @@ impl AutoVmcs {
         unsafe {
             if vmx::vmwrite(field, value).is_none() {
                 warn!(
-                    "[RVM]: vmwrite error: field={:#x}, value={:#x}",
+                    "[RVM] vmwrite error: field={:#x}, value={:#x}",
                     field, value
                 );
             }
@@ -563,7 +564,7 @@ impl AutoVmcs {
 
 impl Drop for AutoVmcs {
     fn drop(&mut self) {
-        println!("AutoVmcs free {:#x?}", self);
         unsafe { interrupt::restore(self.interrupt_flags) };
+        info!("[RVM] interrupts enabled");
     }
 }

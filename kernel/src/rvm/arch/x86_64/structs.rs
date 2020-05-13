@@ -242,5 +242,5 @@ impl VmmState {
 fn cr_is_valid(cr_value: u64, fixed0_msr: u32, fixed1_msr: u32) -> bool {
     let fixed0 = unsafe { Msr::new(fixed0_msr).read() };
     let fixed1 = unsafe { Msr::new(fixed1_msr).read() };
-    return !(cr_value | !fixed0) == 0 && !(!cr_value | fixed1) == 0;
+    return ((cr_value & fixed1) | fixed0) == cr_value;
 }

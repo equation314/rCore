@@ -5,6 +5,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use x86_64::{
     instructions::vmx,
     registers::control::{Cr0, Cr0Flags, Cr3, Cr4, Cr4Flags},
+    registers::model_specific::{Efer, EferFlags},
 };
 
 use super::{
@@ -45,27 +46,49 @@ struct HostState {
 #[derive(Debug, Default)]
 pub struct GuestState {
     //  RIP, RSP, and RFLAGS are automatically saved by VMX in the VMCS.
-    rax: u64,
-    rcx: u64,
-    rdx: u64,
-    rbx: u64,
-    rbp: u64,
-    rsi: u64,
-    rdi: u64,
-    r8: u64,
-    r9: u64,
-    r10: u64,
-    r11: u64,
-    r12: u64,
-    r13: u64,
-    r14: u64,
-    r15: u64,
+    pub rax: u64,
+    pub rcx: u64,
+    pub rdx: u64,
+    pub rbx: u64,
+    pub rbp: u64,
+    pub rsi: u64,
+    pub rdi: u64,
+    pub r8: u64,
+    pub r9: u64,
+    pub r10: u64,
+    pub r11: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
 
     // Control registers.
-    cr2: u64,
+    pub cr2: u64,
 
     // Extended control registers.
-    xcr0: u64,
+    pub xcr0: u64,
+}
+
+impl GuestState {
+    pub fn dump(&self, vmcs: &AutoVmcs) -> alloc::string::String {
+        format!(
+            "VCPU Dump:\n\
+            RIP: {:#x?}\n\
+            RSP: {:#x?}\n\
+            RFLAGS: {:#x?}\n\
+            CR0: {:#x?}\n\
+            CR3: {:#x?}\n\
+            CR4: {:#x?}\n\
+            {:#x?}",
+            vmcs.readXX(VmcsFieldXX::GUEST_RIP),
+            vmcs.readXX(VmcsFieldXX::GUEST_RSP),
+            vmcs.readXX(VmcsFieldXX::GUEST_RFLAGS),
+            Cr0Flags::from_bits_truncate(vmcs.readXX(VmcsFieldXX::GUEST_CR0) as u64),
+            vmcs.readXX(VmcsFieldXX::GUEST_CR3),
+            Cr4Flags::from_bits_truncate(vmcs.readXX(VmcsFieldXX::GUEST_CR4) as u64),
+            self
+        )
+    }
 }
 
 /// Host and guest cpu register states.
@@ -143,7 +166,7 @@ impl Vcpu {
 
     /// Setup VMCS host state.
     unsafe fn init_vmcs_host(&self, vmcs: &mut AutoVmcs) -> RvmResult<()> {
-        vmcs.write64(VmcsField64::HOST_IA32_PAT, Msr::new(MSR_IA32_EFER).read());
+        vmcs.write64(VmcsField64::HOST_IA32_PAT, Msr::new(MSR_IA32_PAT).read());
         vmcs.write64(VmcsField64::HOST_IA32_EFER, Msr::new(MSR_IA32_EFER).read());
 
         vmcs.writeXX(VmcsFieldXX::HOST_CR0, Cr0::read_raw() as usize);
@@ -184,9 +207,11 @@ impl Vcpu {
     }
 
     /// Setup VMCS guest state.
-    unsafe fn init_vmcs_guest(&self, vmcs: &mut AutoVmcs, _entry: u64) -> RvmResult<()> {
+    unsafe fn init_vmcs_guest(&self, vmcs: &mut AutoVmcs, entry: u64) -> RvmResult<()> {
         vmcs.write64(VmcsField64::GUEST_IA32_PAT, Msr::new(MSR_IA32_PAT).read());
-        vmcs.write64(VmcsField64::GUEST_IA32_EFER, Msr::new(MSR_IA32_EFER).read()); // TODO: Disable LME/LMA?
+        let mut efer = Efer::read();
+        efer.remove(EferFlags::LONG_MODE_ENABLE | EferFlags::LONG_MODE_ACTIVE);
+        vmcs.write64(VmcsField64::GUEST_IA32_EFER, efer.bits());
 
         vmcs.writeXX(VmcsFieldXX::GUEST_CR3, 0);
         let cr0 = Cr0Flags::NUMERIC_ERROR.bits() as usize;
@@ -204,17 +229,22 @@ impl Vcpu {
         let cs_rights = default_rights | GuestRegisterAccessRights::EXECUTABLE.bits();
 
         // Setup CS and entry point. Use CS to set the entry point on APs.
-        vmcs.write16(VmcsField16::GUEST_CS_SELECTOR, 0xf000);
-        vmcs.writeXX(VmcsFieldXX::GUEST_CS_BASE, 0xffff_0000);
+        // TODO: set the entry pointer as CS:RIP = 0xf000:0xfff0, set CS base = 0xffff_0000
+        vmcs.write16(VmcsField16::GUEST_CS_SELECTOR, 0);
+        vmcs.writeXX(VmcsFieldXX::GUEST_CS_BASE, 0);
         vmcs.write32(VmcsField32::GUEST_CS_LIMIT, 0xffff);
         vmcs.write32(VmcsField32::GUEST_CS_AR_BYTES, cs_rights);
-        vmcs.writeXX(VmcsFieldXX::GUEST_RIP, 0x0000_fff0);
+        vmcs.writeXX(VmcsFieldXX::GUEST_RIP, entry as usize);
 
-        // Setup DS, ES, FS, GS, TR, LDTR, GDTR, IDTR.
+        // Setup DS, SS, ES, FS, GS, TR, LDTR, GDTR, IDTR.
         vmcs.write16(VmcsField16::GUEST_DS_SELECTOR, 0);
         vmcs.writeXX(VmcsFieldXX::GUEST_DS_BASE, 0);
         vmcs.write32(VmcsField32::GUEST_DS_LIMIT, 0xffff);
         vmcs.write32(VmcsField32::GUEST_DS_AR_BYTES, default_rights);
+        vmcs.write16(VmcsField16::GUEST_SS_SELECTOR, 0);
+        vmcs.writeXX(VmcsFieldXX::GUEST_SS_BASE, 0);
+        vmcs.write32(VmcsField32::GUEST_SS_LIMIT, 0xffff);
+        vmcs.write32(VmcsField32::GUEST_SS_AR_BYTES, default_rights);
         vmcs.write16(VmcsField16::GUEST_ES_SELECTOR, 0);
         vmcs.writeXX(VmcsFieldXX::GUEST_ES_BASE, 0);
         vmcs.write32(VmcsField32::GUEST_ES_LIMIT, 0xffff);
@@ -465,7 +495,7 @@ impl Vcpu {
 
             // VM Exit
             self.vmx_state.resume = true;
-            if vmexit_handler(&mut vmcs, &self.vmx_state.guest_state)? {
+            if vmexit_handler(&mut vmcs, &mut self.vmx_state.guest_state)? {
                 // forward to user mode handler
                 return Ok(());
             }
@@ -528,12 +558,19 @@ unsafe fn vmx_entry(_vmx_state: &mut VmxState) -> RvmResult<()> {
     jmp     2f
 1:  vmresume
 2:
-
     // We will only be here if vmlaunch or vmresume failed.
-    // Restore host RDI, RSP and return address.
+    // Restore host callee, RSP and return address.
     mov     rdi, rsp
+    mov     rbx, [rdi + $1]
     mov     rsp, [rdi + $2]
-    push    qword ptr [rdi + $0]
+    mov     rbp, [rdi + $3]
+    mov     r12, [rdi + $4]
+    mov     r13, [rdi + $5]
+    mov     r14, [rdi + $6]
+    mov     r15, [rdi + $7]
+    push    qword ptr [rdi + $8] // rflags
+    popf
+    push    qword ptr [rdi + $0] // rip
 "
     :
     : "i" (host_off + offset_of!(HostState, rip)),
@@ -606,7 +643,6 @@ unsafe fn vmx_exit(_vmx_state: &mut VmxState) -> RvmResult<()> {
     mov     rdi, rsp
 
     // Load host callee save registers, return address, and processor flags.
-
     mov     rbx, [rdi + $1]
     mov     rsp, [rdi + $2]
     mov     rbp, [rdi + $3]
