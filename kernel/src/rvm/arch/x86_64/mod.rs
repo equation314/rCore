@@ -3,13 +3,13 @@ use raw_cpuid::CpuId;
 mod epage_table;
 mod exit_reason;
 mod guest;
+mod guest_phys_memory_set;
 mod msr;
 mod structs;
 mod vcpu;
 mod vmcs;
 mod vmexit;
 
-pub use epage_table::{EPageTable, EPageTableHandler};
 pub use guest::Guest;
 pub use vcpu::Vcpu;
 

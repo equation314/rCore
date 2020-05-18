@@ -7,18 +7,14 @@ use spin::RwLock;
 use rcore_fs::vfs::*;
 
 use super::arch::{self, Guest, Vcpu};
-use super::arch::{EPageTable, EPageTableHandler};
 use crate::memory::copy_from_user;
-use crate::memory::GlobalFrameAlloc;
-use crate::process::current_thread;
-use rcore_memory::{memory_set::MemoryAttr, PAGE_SIZE};
 
 const MAX_GUEST_NUM: usize = 64;
 const MAX_VCPU_NUM: usize = 64;
 
 const RVM_IO: u32 = 0xAE00;
 const RVM_GUEST_CREATE: u32 = RVM_IO + 0x01;
-const RVM_GUEST_ACCESS_MEMORY: u32 = RVM_IO + 0x02; // get address to access guest's memory
+const RVM_GUEST_MEMORY_REGION_ADD: u32 = RVM_IO + 0x02;
 const RVM_VCPU_CREATE: u32 = RVM_IO + 0x11;
 const RVM_VCPU_RESUME: u32 = RVM_IO + 0x12;
 
@@ -32,6 +28,14 @@ pub struct RvmINode {
 struct RvmVcpuCreateArgs {
     vmid: u16,
     entry: u64,
+}
+
+#[repr(C)]
+#[derive(Debug)]
+struct RvmGuestMemoryRegionAddArgs {
+    vmid: u16,
+    guest_start_paddr: u64,
+    memory_size: u64,
 }
 
 impl INode for RvmINode {
@@ -69,47 +73,30 @@ impl INode for RvmINode {
     fn io_control(&self, cmd: u32, data: usize) -> Result<usize> {
         match cmd {
             RVM_GUEST_CREATE => {
-                let phsy_mem_size = data;
-                info!("[RVM] ioctl RVM_GUEST_CREATE {:#x}", phsy_mem_size);
+                info!("[RVM] ioctl RVM_GUEST_CREATE");
                 if arch::check_hypervisor_feature() {
                     let vmid = self.get_free_vmid();
                     if vmid >= MAX_GUEST_NUM {
                         warn!("[RVM] too many guests ({})", MAX_GUEST_NUM);
                         return Err(FsError::NoDeviceSpace);
                     }
-                    let thread = unsafe { current_thread() };
-                    let vmm_vaddr = thread.vm.lock().find_free_area(PAGE_SIZE, phsy_mem_size);
-                    info!("[RVM] vmm vaddr for vmid {} is 0x{:x}", vmid, vmm_vaddr);
-                    let epage_table = Arc::new(Box::new(EPageTable::new(
-                        phsy_mem_size,
-                        0,
-                        vmm_vaddr,
-                        GlobalFrameAlloc,
-                    )));
-
-                    let mut guest = Guest::new(phsy_mem_size, Arc::clone(&epage_table))?;
+                    let guest = Guest::new()?;
                     assert!(self.add_guest(guest) == vmid);
-
-                    let handler = EPageTableHandler::new(Arc::clone(&epage_table));
-                    thread.vm.lock().push(
-                        vmm_vaddr,
-                        vmm_vaddr + phsy_mem_size,
-                        MemoryAttr::default().user().writable(),
-                        handler,
-                        "vmm_guest_physical",
-                    );
-
                     Ok(vmid)
                 } else {
                     warn!("[RVM] no hardware support");
                     Err(FsError::NotSupported)
                 }
             }
-            RVM_GUEST_ACCESS_MEMORY => {
-                let vmid = data;
-                info!("[RVM] ioctl RVM_GUEST_ACCESS_MEMORY {:x?}", vmid);
+            RVM_GUEST_MEMORY_REGION_ADD => {
+                let args = copy_from_user(data as *const RvmGuestMemoryRegionAddArgs)
+                    .ok_or(FsError::InvalidParam)?;
+                let vmid = args.vmid as usize;
+                let guest_start_paddr = args.guest_start_paddr as usize;
+                let memory_size = args.memory_size as usize;
+                info!("[RVM] ioctl RVM_GUEST_MEMORY_REGION_ADD {:x?}", args);
                 if let Some(guest) = self.guests.read().get(&vmid) {
-                    Ok(guest.access_guest_memory())
+                    guest.add_memory_region(guest_start_paddr, memory_size)
                 } else {
                     Err(FsError::InvalidParam)
                 }
@@ -125,7 +112,7 @@ impl INode for RvmINode {
                         warn!("[RVM] too many vcpus ({})", MAX_VCPU_NUM);
                         return Err(FsError::NoDeviceSpace);
                     }
-                    let mut vcpu = Vcpu::new(vpid as u16, Arc::downgrade(guest))?;
+                    let mut vcpu = Vcpu::new(vpid as u16, guest.clone())?;
                     vcpu.init(args.entry)?;
                     assert!(self.add_vcpu(vcpu) == vpid);
                     Ok(vpid)

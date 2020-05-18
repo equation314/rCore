@@ -1,56 +1,30 @@
 // ref: https://github.com/SinaKarvandi/Hypervisor-From-Scratch/blob/master/Part%204%20-%20Address%20Translation%20Using%20Extended%20Page%20Table%20(EPT)/MyHypervisorDriver/MyHypervisorDriver/EPT.h
+// TODO: better code style
 
 #![allow(dead_code)]
 
-use crate::memory::phys_to_virt;
-use alloc::boxed::Box;
-use alloc::sync::Arc;
-use rcore_memory::memory_set::handler::{FrameAllocator, MemoryHandler};
-use rcore_memory::memory_set::MemoryAttr;
-use rcore_memory::paging::PageTable;
+use rcore_memory::memory_set::handler::FrameAllocator;
 use rcore_memory::PAGE_SIZE;
-use rcore_memory::{PhysAddr, VirtAddr};
+
+use super::guest_phys_memory_set::{GuestPhysAddr, HostPhysAddr};
+use crate::memory::phys_to_virt;
 
 const MASK_PAGE_ALIGNED: usize = PAGE_SIZE - 1;
 
 /// Extended page table
 #[derive(Debug)]
 pub struct EPageTable<T: FrameAllocator> {
-    guest_physi_size: usize,
-    guest_physi_start: usize,
-    vmm_virt_start: VirtAddr,
     allocator: T,
-
-    ept_page_root: PhysAddr,
+    ept_page_root: HostPhysAddr,
 }
 
 impl<T: FrameAllocator> EPageTable<T> {
     /// Create a new EPageTable
     ///
     /// # Arguments
-    ///     * guest_physi_size:
-    ///         guest os physical memory size, unit: byte, must be 4KiB aligned
-    ///     * guest_physi_start:
-    ///         guest os physical memory start address, whole physical memory will be in [guest_physi_start, guest_physi_start + guest_physi_size)
-    ///         guest_physi_start must be 4KiB aligned
-    ///     * vmm_virt_start:
-    ///         vmm's virtual memory start address that mapping guest's memory address,
-    ///         that is, vmm can access guest's physical memory through vmm's virtual address [vmm_virt_start, vmm_virt_start + guest_physi_size)
     ///     * allocator: FrameAllocator
-    pub fn new(
-        guest_physi_size: usize,
-        guest_physi_start: usize,
-        vmm_virt_start: VirtAddr,
-        allocator: T,
-    ) -> Self {
-        assert_eq!(guest_physi_size & MASK_PAGE_ALIGNED, 0);
-        assert_eq!(guest_physi_start & MASK_PAGE_ALIGNED, 0);
-        assert_eq!(vmm_virt_start & MASK_PAGE_ALIGNED, 0);
-
+    pub fn new(allocator: T) -> Self {
         let mut epage_table = Self {
-            guest_physi_size,
-            guest_physi_start,
-            vmm_virt_start,
             allocator,
             ept_page_root: 0,
         };
@@ -66,12 +40,18 @@ impl<T: FrameAllocator> EPageTable<T> {
         eptp.set_epage_table_root(self.ept_page_root);
         return eptp.value();
     }
-    pub fn vmm_vaddr(&self) -> VirtAddr {
-        self.vmm_virt_start
+
+    pub fn map(&mut self, guest_paddr: GuestPhysAddr, target: HostPhysAddr) -> EPageEntry {
+        let mut entry = self.get_entry(guest_paddr);
+        assert!(!entry.is_present());
+        entry.set_physical_address(target);
+        entry.set_present(true);
+        entry.set_ept_memory_type(6);
+        entry
     }
 
     /// return page entry, will create page table if need
-    fn walk(&self, guest_pa: usize) -> EPageEntry {
+    pub fn get_entry(&self, guest_pa: GuestPhysAddr) -> EPageEntry {
         let mut page_table = self.ept_page_root;
         for level in 0..4 {
             let index = (guest_pa >> (12 + (3 - level) * 9)) & 0o777;
@@ -86,9 +66,7 @@ impl<T: FrameAllocator> EPageTable<T> {
                     EPageEntry::new(new_page + idx * 8).zero();
                 }
                 entry.set_physical_address(new_page);
-                entry.set_read(true);
-                entry.set_write(true);
-                entry.set_execute(true);
+                entry.set_present(true);
             }
             page_table = entry.get_physical_address();
         }
@@ -109,28 +87,9 @@ impl<T: FrameAllocator> EPageTable<T> {
             self.ept_page_root
         );
 
-        let mut guest_mem_start = self.guest_physi_start;
-        let guest_mem_end = self.guest_physi_start + self.guest_physi_size;
-        loop {
-            if guest_mem_start >= guest_mem_end {
-                break;
-            }
-            let mut entry = self.walk(guest_mem_start);
-            assert!(!entry.is_present());
-            let new_page = self
-                .allocator
-                .alloc()
-                .expect("failed to alloc guest memory frame");
-            entry.set_physical_address(new_page);
-            entry.set_read(true);
-            entry.set_write(true);
-            entry.set_execute(true);
-            entry.set_ept_memory_type(6);
-            guest_mem_start += PAGE_SIZE;
-        }
         info!("[RVM] epage_table: successed build ept");
     }
-    fn unbuild_dfs(&self, page: PhysAddr, level: usize) {
+    fn unbuild_dfs(&self, page: HostPhysAddr, level: usize) {
         for idx in 0..512 {
             let entry = EPageEntry::new(page + idx * 8);
             if entry.is_present() {
@@ -156,56 +115,6 @@ impl<T: FrameAllocator> Drop for EPageTable<T> {
     }
 }
 
-/// used for mapping vmm's virtual memory to guest os's physical memory
-#[derive(Debug, Clone)]
-pub struct EPageTableHandler<T: FrameAllocator>(Arc<Box<EPageTable<T>>>);
-
-impl<T: FrameAllocator> EPageTableHandler<T> {
-    pub fn new(epage_table: Arc<Box<EPageTable<T>>>) -> Self {
-        Self(epage_table)
-    }
-}
-
-impl<T: FrameAllocator> MemoryHandler for EPageTableHandler<T> {
-    fn box_clone(&self) -> Box<dyn MemoryHandler> {
-        Box::new(self.clone())
-    }
-
-    fn map(&self, pt: &mut dyn PageTable, addr: VirtAddr, attr: &MemoryAttr) {
-        assert!(
-            self.0.vmm_virt_start <= addr && addr < self.0.vmm_virt_start + self.0.guest_physi_size
-        );
-        let guest_pa = addr - self.0.vmm_virt_start + self.0.guest_physi_start;
-        let target = self.0.walk(guest_pa).get_physical_address();
-        let entry = pt.map(addr, target);
-        attr.apply(entry);
-    }
-
-    fn unmap(&self, pt: &mut dyn PageTable, addr: VirtAddr) {
-        assert!(
-            self.0.vmm_virt_start <= addr && addr < self.0.vmm_virt_start + self.0.guest_physi_size
-        );
-        pt.unmap(addr);
-    }
-
-    fn clone_map(
-        &self,
-        pt: &mut dyn PageTable,
-        src_pt: &mut dyn PageTable,
-        addr: VirtAddr,
-        attr: &MemoryAttr,
-    ) {
-        // copied from ByFrame
-        self.map(pt, addr, attr);
-        let data = src_pt.get_page_slice_mut(addr);
-        pt.get_page_slice_mut(addr).copy_from_slice(data);
-    }
-
-    fn handle_page_fault(&self, _pt: &mut dyn PageTable, _addr: VirtAddr) -> bool {
-        false
-    }
-}
-
 /*
 struct {
     UINT64 Read : 1; // bit 0
@@ -224,12 +133,13 @@ struct {
     UINT64 SuppressVE : 1; // bit 63 (last level entry only)
 }Fields;
 */
-struct EPageEntry {
-    hpaaddr: PhysAddr, // host physical addr
+// TODO: use bitflags
+pub struct EPageEntry {
+    hpaaddr: HostPhysAddr, // host physical addr
 }
 
 impl EPageEntry {
-    fn new(hpaaddr: PhysAddr) -> Self {
+    fn new(hpaaddr: HostPhysAddr) -> Self {
         assert_eq!(PAGE_SIZE, 4096); // TODO
         Self { hpaaddr }
     }
@@ -252,14 +162,21 @@ impl EPageEntry {
         assert!(s < t && t <= 64);
         assert!(value < (1 << (t - s)));
         let old_value = self.get_value();
-        self.set_value(old_value - self.get_bits(s, t) + (value << s));
+        self.set_value(old_value - (self.get_bits(s, t) << s) + (value << s));
     }
 
     fn zero(&mut self) {
         self.set_value(0);
     }
-    fn is_present(&self) -> bool {
-        self.get_physical_address() != 0
+    pub fn is_present(&self) -> bool {
+        self.get_bits(0, 3) != 0
+    }
+    pub fn set_present(&mut self, value: bool) {
+        if value {
+            self.set_bits(0, 3, 0b111)
+        } else {
+            self.set_bits(0, 3, 0)
+        }
     }
 
     fn get_read(&self) -> bool {
@@ -311,10 +228,10 @@ impl EPageEntry {
         self.set_bits(10, 11, value as usize)
     }
 
-    fn get_physical_address(&self) -> PhysAddr {
+    pub fn get_physical_address(&self) -> HostPhysAddr {
         self.get_bits(12, 48) << 12
     }
-    fn set_physical_address(&mut self, value: PhysAddr) {
+    pub fn set_physical_address(&mut self, value: HostPhysAddr) {
         assert_eq!(value & MASK_PAGE_ALIGNED, 0);
         self.set_bits(12, 48, value >> 12);
     }
@@ -376,7 +293,7 @@ impl EPTP {
     fn get_epage_table_root(&self) -> usize {
         self.get_bits(12, 48) << 12
     }
-    fn set_epage_table_root(&mut self, value: PhysAddr) {
+    fn set_epage_table_root(&mut self, value: HostPhysAddr) {
         assert_eq!(value & MASK_PAGE_ALIGNED, 0);
         self.set_bits(12, 48, value >> 12);
     }

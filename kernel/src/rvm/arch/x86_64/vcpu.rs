@@ -1,6 +1,6 @@
 //! The virtual CPU within a guest.
 
-use alloc::{boxed::Box, sync::Weak};
+use alloc::{boxed::Box, sync::Arc};
 use core::sync::atomic::{AtomicBool, Ordering};
 use x86_64::{
     instructions::vmx,
@@ -104,7 +104,7 @@ struct VmxState {
 #[derive(Debug)]
 pub struct Vcpu {
     vpid: u16,
-    guest: Weak<Box<Guest>>,
+    guest: Arc<Box<Guest>>,
     running: AtomicBool,
     vmx_state: VmxState,
     vmcs_page: VmxPage,
@@ -113,7 +113,7 @@ pub struct Vcpu {
 }
 
 impl Vcpu {
-    pub fn new(vpid: u16, guest: Weak<Box<Guest>>) -> RvmResult<Box<Self>> {
+    pub fn new(vpid: u16, guest: Arc<Box<Guest>>) -> RvmResult<Box<Self>> {
         // TODO pin thread
 
         let vmx_basic = VmxBasic::read();
@@ -430,11 +430,7 @@ impl Vcpu {
         // treated as guest-physical addresses. Guest-physical addresses are
         // translated by traversing a set of EPT paging structures to produce
         // physical addresses that are used to access memory.
-        let eptp = self
-            .guest
-            .upgrade()
-            .expect("[RVM] cannot get guest for vcpu")
-            .eptp() as u64;
+        let eptp = self.guest.eptp() as u64;
         vmcs.write64(VmcsField64::EPT_POINTER, eptp);
 
         // From Volume 3, Section 28.3.3.4: Software can use an INVEPT with type all
@@ -487,7 +483,7 @@ impl Vcpu {
 
             if res.is_err() {
                 warn!(
-                    "[RVM] VCPU resume faild: {:#x}",
+                    "[RVM] VCPU resume failed: {:#x}",
                     vmcs.read32(VmcsField32::VM_INSTRUCTION_ERROR)
                 );
                 return res;
@@ -495,7 +491,7 @@ impl Vcpu {
 
             // VM Exit
             self.vmx_state.resume = true;
-            if vmexit_handler(&mut vmcs, &mut self.vmx_state.guest_state)? {
+            if vmexit_handler(&mut vmcs, &mut self.vmx_state.guest_state, &self.guest.gpm)? {
                 // forward to user mode handler
                 return Ok(());
             }
@@ -680,9 +676,7 @@ unsafe fn vmx_exit(_vmx_state: &mut VmxState) -> RvmResult<()> {
       "i" (guest_off + offset_of!(GuestState, r12)),
       "i" (guest_off + offset_of!(GuestState, r13)),
       "i" (guest_off + offset_of!(GuestState, r14)),
-      "i" (guest_off + offset_of!(GuestState, r15)),
-
-      "i" (offset_of!(VmxState, resume))
+      "i" (guest_off + offset_of!(GuestState, r15))
     : "cc", "memory",
       "rax", "rbx", "rcx", "rdx", "rdi", "rsi"
       "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"

@@ -2,38 +2,54 @@
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
+use spin::RwLock;
 
-use super::epage_table::EPageTable;
+use rcore_memory::{memory_set::MemoryAttr, PAGE_SIZE};
+
+use super::guest_phys_memory_set::{
+    GuestPhysAddr, GuestPhysicalMemorySet, HostVirtAddr, RvmPageTableHandlerDelay,
+};
 use super::structs::VMM_STATE;
 use crate::memory::GlobalFrameAlloc;
 use crate::rvm::RvmResult;
-use rcore_memory::VirtAddr;
 
 /// Represents a guest within the hypervisor.
 #[derive(Debug)]
 pub struct Guest {
-    _phsy_mem_size: usize,
-    epage_table: Arc<Box<EPageTable<GlobalFrameAlloc>>>,
+    pub gpm: Arc<RwLock<GuestPhysicalMemorySet>>,
 }
 
 impl Guest {
-    pub fn new(
-        phsy_mem_size: usize,
-        epage_table: Arc<Box<EPageTable<GlobalFrameAlloc>>>,
-    ) -> RvmResult<Box<Self>> {
+    pub fn new() -> RvmResult<Box<Self>> {
         VMM_STATE.lock().alloc()?;
         Ok(Box::new(Self {
-            _phsy_mem_size: phsy_mem_size,
-            epage_table,
+            gpm: Arc::new(RwLock::new(GuestPhysicalMemorySet::new())),
         }))
     }
 
-    pub fn access_guest_memory(&self) -> VirtAddr {
-        self.epage_table.vmm_vaddr()
+    pub fn eptp(&self) -> usize {
+        self.gpm.read().token()
     }
 
-    pub fn eptp(&self) -> usize {
-        self.epage_table.eptp()
+    pub fn add_memory_region(
+        &self,
+        start_paddr: GuestPhysAddr,
+        size: usize,
+    ) -> RvmResult<HostVirtAddr> {
+        self.gpm.write().push(start_paddr, size)?;
+
+        let mut vm = unsafe { crate::process::current_thread().vm.lock() };
+        let vaddr = vm.find_free_area(PAGE_SIZE, size);
+        let handler =
+            RvmPageTableHandlerDelay::new(start_paddr, vaddr, self.gpm.clone(), GlobalFrameAlloc);
+        vm.push(
+            vaddr,
+            vaddr + size,
+            MemoryAttr::default().user().writable(),
+            handler,
+            "rvm_guest_physical",
+        );
+        Ok(vaddr)
     }
 }
 
