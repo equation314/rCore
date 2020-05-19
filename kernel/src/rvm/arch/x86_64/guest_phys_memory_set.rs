@@ -151,6 +151,15 @@ impl GuestPhysicalMemorySet {
             false
         }
     }
+
+    pub fn fetch_data(&self, guest_paddr: GuestPhysAddr, len: usize) -> Vec<u8> {
+        let mut buf = vec![0; len];
+        let entry = self.rvm_page_table.get_entry(guest_paddr);
+        let host_paddr = entry.get_physical_address() + (guest_paddr & (PAGE_SIZE - 1));
+        let host_vaddr = crate::memory::phys_to_virt(host_paddr);
+        unsafe { buf.copy_from_slice(core::slice::from_raw_parts(host_vaddr as *const u8, len)) }
+        buf
+    }
 }
 
 impl Drop for GuestPhysicalMemorySet {

@@ -228,13 +228,19 @@ impl Vcpu {
         let default_rights = GuestRegisterAccessRights::default().bits();
         let cs_rights = default_rights | GuestRegisterAccessRights::EXECUTABLE.bits();
 
-        // Setup CS and entry point. Use CS to set the entry point on APs.
-        // TODO: set the entry pointer as CS:RIP = 0xf000:0xfff0, set CS base = 0xffff_0000
-        vmcs.write16(VmcsField16::GUEST_CS_SELECTOR, 0);
-        vmcs.writeXX(VmcsFieldXX::GUEST_CS_BASE, 0);
+        // Setup CS and entry point.
         vmcs.write32(VmcsField32::GUEST_CS_LIMIT, 0xffff);
         vmcs.write32(VmcsField32::GUEST_CS_AR_BYTES, cs_rights);
-        vmcs.writeXX(VmcsFieldXX::GUEST_RIP, entry as usize);
+        if entry > 0 {
+            vmcs.write16(VmcsField16::GUEST_CS_SELECTOR, 0);
+            vmcs.writeXX(VmcsFieldXX::GUEST_CS_BASE, 0);
+            vmcs.writeXX(VmcsFieldXX::GUEST_RIP, entry as usize);
+        } else {
+            // Reference: Volume 3, Section 9.1.4, First Instruction Executed.
+            vmcs.write16(VmcsField16::GUEST_CS_SELECTOR, 0xf000);
+            vmcs.writeXX(VmcsFieldXX::GUEST_CS_BASE, 0xffff_0000);
+            vmcs.writeXX(VmcsFieldXX::GUEST_RIP, 0xfff0);
+        }
 
         // Setup DS, SS, ES, FS, GS, TR, LDTR, GDTR, IDTR.
         vmcs.write16(VmcsField16::GUEST_DS_SELECTOR, 0);

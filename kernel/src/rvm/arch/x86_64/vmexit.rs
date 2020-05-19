@@ -38,9 +38,30 @@ impl ExitInfo {
     }
 }
 
+#[derive(Debug)]
+struct IoInfo {
+    access_size: u8,
+    input: bool,
+    string: bool,
+    repeat: bool,
+    port: u16,
+}
+
+impl IoInfo {
+    fn from(qualification: usize) -> Self {
+        Self {
+            access_size: qualification.get_bits(0..3) as u8,
+            input: qualification.get_bit(3),
+            string: qualification.get_bit(4),
+            repeat: qualification.get_bit(5),
+            port: qualification.get_bits(16..32) as u16,
+        }
+    }
+}
+
 fn handle_external_interrupt(vmcs: &AutoVmcs) -> RvmResult<bool> {
-    trace!(
-        "[RVM] VM exit: External interrupt {:#x?}",
+    warn!(
+        "[RVM] VM exit: Unhandled external interrupt {:#x?}",
         vmcs.read32(VmcsField32::VM_EXIT_INTR_INFO)
     );
     // TODO: construct `TrapFrame` and call `arch::interrupt::handler::rust_trap()`
@@ -62,6 +83,38 @@ fn handle_vmcall(
     ];
     guest_state.rax = 0;
     println!("[RVM] VM exit: VMCALL({:#x}) args: {:x?}", num, args);
+    Ok(false)
+}
+
+fn handle_io_instruction(
+    exit_info: &ExitInfo,
+    vmcs: &mut AutoVmcs,
+    guest_state: &mut GuestState,
+) -> RvmResult<bool> {
+    let io_info = IoInfo::from(exit_info.exit_qualification);
+    if io_info.string || io_info.repeat {
+        warn!("[RVM] Unsupported IO instruction");
+        return Err(RvmError::NotSupported);
+    }
+
+    exit_info.next_rip(vmcs);
+    if !io_info.input {
+        match io_info.port {
+            // QEMU debug port used for SeaBIOS
+            // TODO: move to userspace
+            0x402 => {
+                let ch = guest_state.rax as u8;
+                print!("{}", ch as char);
+                return Ok(false);
+            }
+            _ => {}
+        }
+    }
+
+    warn!(
+        "[RVM] VM exit: Unhandled I/O instruction @ RIP({:#x}):\n{:#x?}",
+        exit_info.guest_rip, io_info
+    );
     Ok(false)
 }
 
@@ -87,7 +140,7 @@ fn handle_ept_violation(
 ) -> RvmResult<bool> {
     let guest_paddr = vmcs.read64(VmcsField64::GUEST_PHYSICAL_ADDRESS) as usize;
     trace!(
-        "[RVM] VM exit: EPT violation @ {:#x} RIP: {:#x}",
+        "[RVM] VM exit: EPT violation @ {:#x} RIP({:#x})",
         guest_paddr,
         exit_info.guest_rip
     );
@@ -127,16 +180,21 @@ pub fn vmexit_handler(
     let res = match exit_info.exit_reason {
         ExitReason::EXTERNAL_INTERRUPT => handle_external_interrupt(vmcs),
         ExitReason::VMCALL => handle_vmcall(&exit_info, vmcs, guest_state),
+        ExitReason::IO_INSTRUCTION => handle_io_instruction(&exit_info, vmcs, guest_state),
         ExitReason::EPT_VIOLATION => handle_ept_violation(&exit_info, vmcs, gpm),
         _ => Err(RvmError::NotSupported),
     };
 
     if res.is_err() {
         warn!(
-            "[RVM] VM exit handler for reason {:?} returned {:?}\n{}",
+            "[RVM] VM exit handler for reason {:?} returned {:?}\n{}\nInstruction: {:x?}",
             exit_info.exit_reason,
             res,
-            guest_state.dump(&vmcs)
+            guest_state.dump(&vmcs),
+            gpm.read().fetch_data(
+                vmcs.readXX(VmcsFieldXX::GUEST_CS_BASE) + exit_info.guest_rip,
+                exit_info.exit_instruction_length as usize
+            ),
         );
     }
     res

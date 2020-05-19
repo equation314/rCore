@@ -449,7 +449,7 @@ impl AutoVmcs {
                 interrupt::restore(interrupt_flags);
                 Err(RvmError::DeviceError)
             } else {
-                info!("[RVM] interrupts disabled");
+                trace!("[RVM] interrupts disabled");
                 Ok(Self {
                     vmcs_paddr: phys_addr.as_u64(),
                     interrupt_flags,
@@ -565,6 +565,6 @@ impl AutoVmcs {
 impl Drop for AutoVmcs {
     fn drop(&mut self) {
         unsafe { interrupt::restore(self.interrupt_flags) };
-        info!("[RVM] interrupts enabled");
+        trace!("[RVM] interrupts enabled");
     }
 }
