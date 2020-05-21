@@ -497,7 +497,12 @@ impl Vcpu {
 
             // VM Exit
             self.vmx_state.resume = true;
-            if vmexit_handler(&mut vmcs, &mut self.vmx_state.guest_state, &self.guest.gpm)? {
+            if vmexit_handler(
+                &mut vmcs,
+                &mut self.vmx_state.guest_state,
+                &self.guest.gpm,
+                &self.guest.traps,
+            )? {
                 // forward to user mode handler
                 return Ok(());
             }

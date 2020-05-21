@@ -14,7 +14,8 @@ const MAX_VCPU_NUM: usize = 64;
 
 const RVM_IO: u32 = 0xAE00;
 const RVM_GUEST_CREATE: u32 = RVM_IO + 0x01;
-const RVM_GUEST_MEMORY_REGION_ADD: u32 = RVM_IO + 0x02;
+const RVM_GUEST_ADD_MEMORY_REGION: u32 = RVM_IO + 0x02;
+const RVM_GUEST_SET_TRAP: u32 = RVM_IO + 0x03;
 const RVM_VCPU_CREATE: u32 = RVM_IO + 0x11;
 const RVM_VCPU_RESUME: u32 = RVM_IO + 0x12;
 
@@ -32,10 +33,20 @@ struct RvmVcpuCreateArgs {
 
 #[repr(C)]
 #[derive(Debug)]
-struct RvmGuestMemoryRegionAddArgs {
+struct RvmGuestAddMemoryRegionArgs {
     vmid: u16,
     guest_start_paddr: u64,
     memory_size: u64,
+}
+
+#[repr(C)]
+#[derive(Debug)]
+struct RvmGuestSetTrapArgs {
+    vmid: u16,
+    kind: u32,
+    addr: u64,
+    size: u64,
+    key: u64,
 }
 
 impl INode for RvmINode {
@@ -88,15 +99,33 @@ impl INode for RvmINode {
                     Err(FsError::NotSupported)
                 }
             }
-            RVM_GUEST_MEMORY_REGION_ADD => {
-                let args = copy_from_user(data as *const RvmGuestMemoryRegionAddArgs)
+            RVM_GUEST_ADD_MEMORY_REGION => {
+                let args = copy_from_user(data as *const RvmGuestAddMemoryRegionArgs)
                     .ok_or(FsError::InvalidParam)?;
                 let vmid = args.vmid as usize;
                 let guest_start_paddr = args.guest_start_paddr as usize;
                 let memory_size = args.memory_size as usize;
-                info!("[RVM] ioctl RVM_GUEST_MEMORY_REGION_ADD {:x?}", args);
+                info!("[RVM] ioctl RVM_GUEST_ADD_MEMORY_REGION {:x?}", args);
                 if let Some(guest) = self.guests.read().get(&vmid) {
                     guest.add_memory_region(guest_start_paddr, memory_size)
+                } else {
+                    Err(FsError::InvalidParam)
+                }
+            }
+            RVM_GUEST_SET_TRAP => {
+                let args = copy_from_user(data as *const RvmGuestSetTrapArgs)
+                    .ok_or(FsError::InvalidParam)?;
+                let vmid = args.vmid as usize;
+                info!("[RVM] ioctl RVM_GUEST_SET_TRAP {:x?}", args);
+                if let Some(guest) = self.guests.read().get(&vmid) {
+                    use core::convert::TryInto;
+                    guest.set_trap(
+                        args.kind.try_into()?,
+                        args.addr as usize,
+                        args.size as usize,
+                        args.key,
+                    )?;
+                    Ok(0)
                 } else {
                     Err(FsError::InvalidParam)
                 }

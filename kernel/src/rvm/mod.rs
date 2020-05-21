@@ -4,6 +4,7 @@
 #[path = "arch/x86_64/mod.rs"]
 mod arch;
 mod inode;
+mod trap_map;
 
 type RvmError = rcore_fs::vfs::FsError;
 type RvmResult<T> = rcore_fs::vfs::Result<T>;

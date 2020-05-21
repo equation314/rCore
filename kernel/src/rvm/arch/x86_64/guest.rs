@@ -11,12 +11,14 @@ use super::guest_phys_memory_set::{
 };
 use super::structs::VMM_STATE;
 use crate::memory::GlobalFrameAlloc;
+use crate::rvm::trap_map::{TrapKind, TrapMap};
 use crate::rvm::RvmResult;
 
 /// Represents a guest within the hypervisor.
 #[derive(Debug)]
 pub struct Guest {
     pub gpm: Arc<RwLock<GuestPhysicalMemorySet>>,
+    pub traps: RwLock<TrapMap>,
 }
 
 impl Guest {
@@ -24,6 +26,7 @@ impl Guest {
         VMM_STATE.lock().alloc()?;
         Ok(Box::new(Self {
             gpm: Arc::new(RwLock::new(GuestPhysicalMemorySet::new())),
+            traps: RwLock::new(TrapMap::new()),
         }))
     }
 
@@ -50,6 +53,10 @@ impl Guest {
             "rvm_guest_physical",
         );
         Ok(vaddr)
+    }
+
+    pub fn set_trap(&self, kind: TrapKind, addr: usize, size: usize, key: u64) -> RvmResult<()> {
+        self.traps.write().push(kind, addr, size, key)
     }
 }
 
