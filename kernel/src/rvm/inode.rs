@@ -7,6 +7,7 @@ use spin::RwLock;
 use rcore_fs::vfs::*;
 
 use super::arch::{self, Guest, Vcpu};
+use super::packet::RvmExitPacket;
 use crate::memory::copy_from_user;
 
 const MAX_GUEST_NUM: usize = 64;
@@ -47,6 +48,13 @@ struct RvmGuestSetTrapArgs {
     addr: u64,
     size: u64,
     key: u64,
+}
+
+#[repr(C)]
+#[derive(Debug)]
+struct RvmVcpuResumeArgs {
+    vcpu_id: u16,
+    packet: RvmExitPacket,
 }
 
 impl INode for RvmINode {
@@ -150,10 +158,14 @@ impl INode for RvmINode {
                 }
             }
             RVM_VCPU_RESUME => {
-                let vpid = data;
+                let args = copy_from_user(data as *const RvmVcpuResumeArgs)
+                    .ok_or(FsError::InvalidParam)?;
+                let vpid = args.vcpu_id as usize;
                 info!("[RVM] ioctl RVM_VCPU_RESUME {:#x}", vpid);
                 if let Some(vcpu) = self.vcpus.write().get_mut(&vpid) {
-                    vcpu.resume()?;
+                    // FIXME: implement copy to user
+                    let mut args = unsafe { &mut *(data as *mut RvmVcpuResumeArgs) };
+                    args.packet = vcpu.resume()?;
                     Ok(0)
                 } else {
                     Err(FsError::InvalidParam)

@@ -8,7 +8,7 @@ use crate::rvm::{RvmError, RvmResult};
 #[derive(Debug, Copy, Clone)]
 pub enum TrapKind {
     Unknown,
-    Mem = 1,
+    Mmio = 1,
     Io = 2,
 }
 
@@ -17,7 +17,7 @@ impl TryFrom<u32> for TrapKind {
 
     fn try_from(value: u32) -> RvmResult<Self> {
         match value {
-            1 => Ok(TrapKind::Mem),
+            1 => Ok(TrapKind::Mmio),
             2 => Ok(TrapKind::Io),
             _ => Err(RvmError::InvalidParam),
         }
@@ -26,10 +26,10 @@ impl TryFrom<u32> for TrapKind {
 
 #[derive(Debug, Copy, Clone)]
 pub struct Trap {
-    kind: TrapKind,
-    addr: usize,
-    size: usize,
-    key: u64,
+    pub kind: TrapKind,
+    pub addr: usize,
+    pub size: usize,
+    pub key: u64,
 }
 
 impl Trap {
@@ -58,7 +58,7 @@ impl TrapMap {
         let traps = match kind {
             #[cfg(target_arch = "x86_64")]
             TrapKind::Io => &self.io_traps,
-            TrapKind::Mem => &self.mem_traps,
+            TrapKind::Mmio => &self.mem_traps,
             _ => return None,
         };
         if let Some((_, trap)) = traps.range(..=addr).last() {
@@ -73,7 +73,7 @@ impl TrapMap {
         let traps = match kind {
             #[cfg(target_arch = "x86_64")]
             TrapKind::Io => &mut self.io_traps,
-            TrapKind::Mem => &mut self.mem_traps,
+            TrapKind::Mmio => &mut self.mem_traps,
             _ => return Err(RvmError::InvalidParam),
         };
         let trap = Trap {

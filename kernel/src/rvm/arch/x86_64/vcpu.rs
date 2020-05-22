@@ -16,7 +16,7 @@ use super::{
     Guest,
 };
 use crate::arch::{gdt, idt};
-use crate::rvm::{RvmError, RvmResult};
+use crate::rvm::{packet::RvmExitPacket, RvmError, RvmResult};
 
 /// Holds the register state used to restore a host.
 #[repr(C)]
@@ -475,7 +475,7 @@ impl Vcpu {
         Ok(())
     }
 
-    pub fn resume(&mut self) -> RvmResult<()> {
+    pub fn resume(&mut self) -> RvmResult<RvmExitPacket> {
         loop {
             let mut vmcs = AutoVmcs::new(self.vmcs_page.phys_addr())?;
 
@@ -487,24 +487,24 @@ impl Vcpu {
             let res = unsafe { vmx_entry(&mut self.vmx_state) };
             self.running.store(false, Ordering::SeqCst);
 
-            if res.is_err() {
+            res.map_err(|err| {
                 warn!(
                     "[RVM] VCPU resume failed: {:#x}",
                     vmcs.read32(VmcsField32::VM_INSTRUCTION_ERROR)
                 );
-                return res;
-            }
+                err
+            })?;
 
             // VM Exit
             self.vmx_state.resume = true;
-            if vmexit_handler(
+            match vmexit_handler(
                 &mut vmcs,
                 &mut self.vmx_state.guest_state,
                 &self.guest.gpm,
                 &self.guest.traps,
             )? {
-                // forward to user mode handler
-                return Ok(());
+                Some(packet) => return Ok(packet), // forward to user mode handler
+                None => continue,
             }
         }
     }

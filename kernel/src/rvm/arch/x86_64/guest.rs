@@ -12,7 +12,7 @@ use super::guest_phys_memory_set::{
 use super::structs::VMM_STATE;
 use crate::memory::GlobalFrameAlloc;
 use crate::rvm::trap_map::{TrapKind, TrapMap};
-use crate::rvm::RvmResult;
+use crate::rvm::{RvmError, RvmResult};
 
 /// Represents a guest within the hypervisor.
 #[derive(Debug)]
@@ -56,7 +56,23 @@ impl Guest {
     }
 
     pub fn set_trap(&self, kind: TrapKind, addr: usize, size: usize, key: u64) -> RvmResult<()> {
-        self.traps.write().push(kind, addr, size, key)
+        match kind {
+            TrapKind::Io => {
+                if addr + size > u16::MAX as usize {
+                    Err(RvmError::InvalidParam)
+                } else {
+                    self.traps.write().push(kind, addr, size, key)
+                }
+            }
+            TrapKind::Mmio => {
+                if addr & (PAGE_SIZE - 1) != 0 || size & (PAGE_SIZE - 1) != 0 {
+                    Err(RvmError::InvalidParam)
+                } else {
+                    self.traps.write().push(kind, addr, size, key)
+                }
+            }
+            _ => Err(RvmError::InvalidParam),
+        }
     }
 }
 
