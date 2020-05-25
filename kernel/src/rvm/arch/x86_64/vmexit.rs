@@ -5,6 +5,7 @@ use bit_field::BitField;
 use spin::RwLock;
 
 use super::exit_reason::ExitReason;
+use super::feature::*;
 use super::guest_phys_memory_set::GuestPhysicalMemorySet;
 use super::{vcpu::GuestState, vmcs::*};
 use crate::rvm::packet::*;
@@ -12,6 +13,22 @@ use crate::rvm::trap_map::{TrapKind, TrapMap};
 use crate::rvm::{RvmError, RvmResult};
 
 type ExitResult = RvmResult<Option<RvmExitPacket>>;
+
+const K_HYP_VENDOR_ID: VendorInfo = VendorInfo {
+    vendor_string: [
+        // "KVMKVMKVM\0\0\0"
+        'K' as u8, 'V' as u8, 'M' as u8, 'K' as u8, 'V' as u8, 'M' as u8, 'K' as u8, 'V' as u8,
+        'M' as u8, 0u8, 0u8, 0u8,
+    ],
+};
+
+const K_FIRST_EXTENDED_STATE_COMPONENT: u32 = 2;
+const K_LAST_EXTENDED_STATE_COMPONENT: u32 = 9;
+// From Volume 1, Section 13.4.
+const K_XSAVE_LEGACY_REGION_SIZE: u32 = 512;
+const K_XSAVE_HEADER_SIZE: u32 = 64;
+
+const K_PROCBASED_CTLS2_INVPCID: u32 = 1 << 12;
 
 #[derive(Debug)]
 struct ExitInfo {
@@ -75,9 +92,186 @@ fn handle_external_interrupt(vmcs: &AutoVmcs) -> ExitResult {
 fn handle_cpuid(
     exit_info: &ExitInfo,
     vmcs: &mut AutoVmcs,
-    _guest_state: &mut GuestState,
+    guest_state: &mut GuestState,
 ) -> ExitResult {
+    let leaf: u32 = guest_state.rax as u32;
+    let subleaf: u32 = guest_state.rcx as u32;
+
     exit_info.next_rip(vmcs);
+
+    const X86_CPUID_BASE: u32 = x86_cpuid_leaf_num::X86_CPUID_BASE as u32;
+    const X86_CPUID_EXT_BASE: u32 = x86_cpuid_leaf_num::X86_CPUID_EXT_BASE as u32;
+    const X86_CPUID_BASE_PLUS_ONE: u32 = X86_CPUID_BASE + 1;
+    const X86_CPUID_EXT_BASE_PLUS_ONE: u32 = X86_CPUID_EXT_BASE + 1;
+    const X86_CPUID_MODEL_FEATURES: u32 = x86_cpuid_leaf_num::X86_CPUID_MODEL_FEATURES as u32;
+    const X86_CPUID_TOPOLOGY: u32 = x86_cpuid_leaf_num::X86_CPUID_TOPOLOGY as u32;
+    const X86_CPUID_XSAVE: u32 = x86_cpuid_leaf_num::X86_CPUID_XSAVE as u32;
+    const X86_CPUID_THERMAL_AND_POWER: u32 = x86_cpuid_leaf_num::X86_CPUID_THERMAL_AND_POWER as u32;
+    const X86_CPUID_PERFORMANCE_MONITORING: u32 =
+        x86_cpuid_leaf_num::X86_CPUID_PERFORMANCE_MONITORING as u32;
+    const X86_CPUID_MON: u32 = x86_cpuid_leaf_num::X86_CPUID_MON as u32;
+    const X86_CPUID_EXTENDED_FEATURE_FLAGS: u32 =
+        x86_cpuid_leaf_num::X86_CPUID_EXTENDED_FEATURE_FLAGS as u32;
+    const X86_CPUID_HYP_BASE: u32 = x86_cpuid_leaf_num::X86_CPUID_HYP_BASE as u32;
+    const X86_CPUID_KVM_FEATURES: u32 = x86_cpuid_leaf_num::X86_CPUID_KVM_FEATURES as u32;
+
+    match leaf {
+        X86_CPUID_BASE | X86_CPUID_EXT_BASE => {
+            cpuid(leaf, guest_state);
+            Ok(None)
+        }
+        X86_CPUID_BASE_PLUS_ONE..=MAX_SUPPORTED_CPUID
+        | X86_CPUID_EXT_BASE_PLUS_ONE..=MAX_SUPPORTED_CPUID_EXT => {
+            cpuid_c(leaf, subleaf, guest_state);
+            match leaf {
+                X86_CPUID_MODEL_FEATURES => {
+                    // Override the initial local APIC ID. From Vol 2, Table 3-8.
+                    guest_state.rbx &= !(0xff << 24);
+                    guest_state.rbx |=
+                        ((vmcs.read16(VmcsField16::VIRTUAL_PROCESSOR_ID) - 1) as u64) << 24;
+                    // Enable the hypervisor bit.
+                    guest_state.rcx |= 1u64 << X86_FEATURE_HYPERVISOR.bit;
+                    // Enable the x2APIC bit.
+                    guest_state.rcx |= 1u64 << X86_FEATURE_X2APIC.bit;
+                    // Disable the VMX bit.
+                    guest_state.rcx &= !(1u64 << X86_FEATURE_VMX.bit);
+                    // Disable the PDCM bit.
+                    guest_state.rcx &= !(1u64 << X86_FEATURE_PDCM.bit);
+                    // Disable MONITOR/MWAIT.
+                    guest_state.rcx &= !(1u64 << X86_FEATURE_MON.bit);
+                    // Disable THERM_INTERRUPT and THERM_STATUS MSRs
+                    guest_state.rcx &= !(1u64 << X86_FEATURE_TM2.bit);
+                    // Enable the SEP (SYSENTER support).
+                    guest_state.rdx |= 1u64 << X86_FEATURE_SEP.bit;
+                    // Disable the Thermal Monitor bit.
+                    guest_state.rdx &= !(1u64 << X86_FEATURE_TM.bit);
+                    // Disable the THERM_CONTROL_MSR bit.
+                    guest_state.rdx &= !(1u64 << X86_FEATURE_ACPI.bit);
+                }
+                X86_CPUID_TOPOLOGY => {
+                    guest_state.rdx = (vmcs.read16(VmcsField16::VIRTUAL_PROCESSOR_ID) - 1) as u64;
+                }
+                X86_CPUID_XSAVE => {
+                    if subleaf == 0 {
+                        let mut xsave_size = 0u32;
+                        let status = compute_xsave_size(guest_state.xcr0, &mut xsave_size);
+                        if status.is_err() {
+                            return status;
+                        }
+                        guest_state.rbx = xsave_size as u64;
+                    } else if subleaf == 1 {
+                        guest_state.rax &= !(1u64 << 3);
+                    }
+                }
+                X86_CPUID_THERMAL_AND_POWER => {
+                    // Disable the performance energy bias bit.
+                    guest_state.rcx &= !(1u64 << X86_FEATURE_PERF_BIAS.bit);
+                    // Disable the hardware coordination feedback bit.
+                    guest_state.rcx &= !(1u64 << X86_FEATURE_HW_FEEDBACK.bit);
+                    guest_state.rax &= !(
+                        // Disable Digital Thermal Sensor
+                        (1u64 << X86_FEATURE_DTS.bit) |
+                        // Disable Package Thermal Status MSR.
+                        (1u64 << X86_FEATURE_PTM.bit) |
+                        // Disable THERM_STATUS MSR bits 10/11 & THERM_INTERRUPT MSR bit 24
+                        (1u64 << X86_FEATURE_PTM.bit) |
+                        // Disable HWP MSRs.
+                        (1u64 << X86_FEATURE_HWP.bit) | (1u64 << X86_FEATURE_HWP_NOT.bit) |
+                        (1u64 << X86_FEATURE_HWP_ACT.bit) | (1u64 << X86_FEATURE_HWP_PREF.bit)
+                    );
+                }
+                X86_CPUID_PERFORMANCE_MONITORING => {
+                    // Disable all performance monitoring.
+                    // 31-07 = Reserved 0, 06-00 = 1 if event is not available.
+                    const PERFORMANCE_MONITORING_NO_EVENTS: u32 = 0b1111111;
+                    guest_state.rax = 0;
+                    guest_state.rbx = PERFORMANCE_MONITORING_NO_EVENTS as u64;
+                    guest_state.rcx = 0;
+                    guest_state.rdx = 0;
+                }
+                X86_CPUID_MON => {
+                    // MONITOR/MWAIT are not implemented.
+                    guest_state.rax = 0;
+                    guest_state.rbx = 0;
+                    guest_state.rcx = 0;
+                    guest_state.rdx = 0;
+                }
+                X86_CPUID_EXTENDED_FEATURE_FLAGS => {
+                    // It's possible when running under KVM in nVMX mode, that host
+                    // CPUID indicates that invpcid is supported but VMX doesn't allow
+                    // to enable INVPCID bit in secondary processor based controls.
+                    // Therefore explicitly clear INVPCID bit in CPUID if the VMX flag
+                    // wasn't set.
+                    // FIXME: here vmcs.read32(VmcsField32::PROCBASED_CTLS2) in zircon
+                    if (vmcs.read32(VmcsField32::SECONDARY_VM_EXEC_CONTROL)
+                        & K_PROCBASED_CTLS2_INVPCID)
+                        == 0
+                    {
+                        guest_state.rbx &= !(164 << X86_FEATURE_INVPCID.bit);
+                    }
+                    // Disable the Processor Trace bit.
+                    guest_state.rbx &= !(1u64 << X86_FEATURE_PT.bit);
+                    // Disable:
+                    //  * Indirect Branch Prediction Barrier bit
+                    //  * Single Thread Indirect Branch Predictors bit
+                    //  * Speculative Store Bypass Disable bit
+                    // These imply support for the IA32_SPEC_CTRL and IA32_PRED_CMD
+                    // MSRs, which are not implemented.
+                    guest_state.rdx &= !(1u64 << X86_FEATURE_IBRS_IBPB.bit
+                        | 1u64 << X86_FEATURE_STIBP.bit
+                        | 1u64 << X86_FEATURE_SSBD.bit);
+                    // Disable support of IA32_ARCH_CAPABILITIES MSR.
+                    guest_state.rdx &= !(1u64 << X86_FEATURE_ARCH_CAPABILITIES.bit);
+                }
+                _ => unreachable!(),
+            };
+            Ok(None)
+        }
+        X86_CPUID_HYP_BASE => {
+            // This leaf is commonly used to identify a hypervisor via ebx:ecx:edx.
+
+            // Since Zircon hypervisor disguises itself as KVM, it needs to return
+            // in EAX max CPUID function supported by hypervisor. Zero in EAX
+            // should be interpreted as 0x40000001. Details are available in the
+            // Linux kernel documentation (Documentation/virtual/kvm/cpuid.txt).
+            guest_state.rax = X86_CPUID_KVM_FEATURES as u64;
+            unsafe { guest_state.rbx = K_HYP_VENDOR_ID.vendor_id[0] as u64 };
+            unsafe { guest_state.rcx = K_HYP_VENDOR_ID.vendor_id[1] as u64 };
+            unsafe { guest_state.rdx = K_HYP_VENDOR_ID.vendor_id[2] as u64 };
+            Ok(None)
+        }
+        X86_CPUID_KVM_FEATURES => {
+            // We support KVM clock. // FIXME
+            // guest_state.rax = kKvmFeatureClockSourceOld | kKvmFeatureClockSource | kKvmFeatureNoIoDelay;
+            guest_state.rax = 0;
+            guest_state.rbx = 0;
+            guest_state.rcx = 0;
+            guest_state.rdx = 0;
+            Ok(None)
+        }
+        _ => {
+            cpuid_c(MAX_SUPPORTED_CPUID, subleaf, guest_state);
+            Ok(None)
+        }
+    }
+}
+fn compute_xsave_size(guest_xcr0: u64, xsave_size: &mut u32) -> ExitResult {
+    *xsave_size = K_XSAVE_LEGACY_REGION_SIZE + K_XSAVE_HEADER_SIZE;
+    for i in K_FIRST_EXTENDED_STATE_COMPONENT..=K_LAST_EXTENDED_STATE_COMPONENT {
+        let mut leaf: cpuid_leaf = cpuid_leaf::default();
+        if (guest_xcr0 & (1 << i)) == 0 {
+            continue;
+        }
+        if x86_get_cpuid_subleaf(x86_cpuid_leaf_num::X86_CPUID_XSAVE, i, &mut leaf) == false {
+            panic!("[RVM] run x86_get_cpuid_subleaf failed");
+        }
+        if leaf.a == 0 && leaf.b == 0 && leaf.c == 0 && leaf.d == 0 {
+            continue;
+        }
+        let component_offset = leaf.b;
+        let component_size = leaf.a;
+        *xsave_size = component_offset + component_size;
+    }
     Ok(None)
 }
 

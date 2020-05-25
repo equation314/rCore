@@ -11,6 +11,8 @@ use super::msr::*;
 use crate::memory::{alloc_frame, dealloc_frame, phys_to_virt};
 use crate::rvm::{RvmError, RvmResult};
 
+use super::feature::x86_feature_init;
+
 /// A physical frame (or virtual page) of size PAGE_SIZE used as VMXON region,
 /// VMCS region, or MSR page, etc.
 #[derive(Debug)]
@@ -218,6 +220,8 @@ impl VmmState {
             }
             info!("[RVM] successed to turn on VMX on CPU {}", cpu_num);
         }
+
+        x86_feature_init();
 
         Ok(())
     }
