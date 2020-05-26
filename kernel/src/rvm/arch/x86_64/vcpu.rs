@@ -508,6 +508,12 @@ impl Vcpu {
             }
         }
     }
+
+    pub fn write_state(&mut self, rax: u64) -> RvmResult<()> {
+        // TODO: write other states
+        self.vmx_state.guest_state.rax = rax;
+        Ok(())
+    }
 }
 
 impl Drop for Vcpu {

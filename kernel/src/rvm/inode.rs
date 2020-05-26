@@ -19,6 +19,7 @@ const RVM_GUEST_ADD_MEMORY_REGION: u32 = RVM_IO + 0x02;
 const RVM_GUEST_SET_TRAP: u32 = RVM_IO + 0x03;
 const RVM_VCPU_CREATE: u32 = RVM_IO + 0x11;
 const RVM_VCPU_RESUME: u32 = RVM_IO + 0x12;
+const RVM_VCPU_WRITE_STATE: u32 = RVM_IO + 0x13;
 
 pub struct RvmINode {
     guests: RwLock<BTreeMap<usize, Arc<Box<Guest>>>>,
@@ -55,6 +56,14 @@ struct RvmGuestSetTrapArgs {
 struct RvmVcpuResumeArgs {
     vcpu_id: u16,
     packet: RvmExitPacket,
+}
+
+// TODO: write other registers
+#[repr(C)]
+#[derive(Debug)]
+struct RvmVcpuWriteStateArgs {
+    vcpu_id: u16,
+    rax: u64,
 }
 
 impl INode for RvmINode {
@@ -166,6 +175,18 @@ impl INode for RvmINode {
                     // FIXME: implement copy to user
                     let mut args = unsafe { &mut *(data as *mut RvmVcpuResumeArgs) };
                     args.packet = vcpu.resume()?;
+                    Ok(0)
+                } else {
+                    Err(FsError::InvalidParam)
+                }
+            }
+            RVM_VCPU_WRITE_STATE => {
+                let args = copy_from_user(data as *const RvmVcpuWriteStateArgs)
+                    .ok_or(FsError::InvalidParam)?;
+                let vpid = args.vcpu_id as usize;
+                info!("[RVM] ioctl RVM_VCPU_WRITE_STATE {:#x} {:#x?}", vpid, args);
+                if let Some(vcpu) = self.vcpus.write().get_mut(&vpid) {
+                    vcpu.write_state(args.rax)?;
                     Ok(0)
                 } else {
                     Err(FsError::InvalidParam)
