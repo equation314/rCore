@@ -7,7 +7,7 @@ use spin::RwLock;
 use rcore_fs::vfs::*;
 
 use super::arch::{self, Guest, Vcpu};
-use super::packet::RvmExitPacket;
+use super::packet::{IoValue, RvmExitPacket};
 use crate::memory::copy_from_user;
 
 const MAX_GUEST_NUM: usize = 64;
@@ -20,6 +20,7 @@ const RVM_GUEST_SET_TRAP: u32 = RVM_IO + 0x03;
 const RVM_VCPU_CREATE: u32 = RVM_IO + 0x11;
 const RVM_VCPU_RESUME: u32 = RVM_IO + 0x12;
 const RVM_VCPU_WRITE_STATE: u32 = RVM_IO + 0x13;
+const RVM_VCPU_WRITE_INPUT_VALUE: u32 = RVM_IO + 0x14;
 
 pub struct RvmINode {
     guests: RwLock<BTreeMap<usize, Arc<Box<Guest>>>>,
@@ -64,6 +65,14 @@ struct RvmVcpuResumeArgs {
 struct RvmVcpuWriteStateArgs {
     vcpu_id: u16,
     rax: u64,
+}
+
+#[repr(C)]
+#[derive(Debug)]
+struct RvmVcpuWriteInputValueArgs {
+    vcpu_id: u16,
+    access_size: u8,
+    value: IoValue,
 }
 
 impl INode for RvmINode {
@@ -187,6 +196,22 @@ impl INode for RvmINode {
                 info!("[RVM] ioctl RVM_VCPU_WRITE_STATE {:#x} {:#x?}", vpid, args);
                 if let Some(vcpu) = self.vcpus.write().get_mut(&vpid) {
                     vcpu.write_state(args.rax)?;
+                    Ok(0)
+                } else {
+                    Err(FsError::InvalidParam)
+                }
+            }
+            RVM_VCPU_WRITE_INPUT_VALUE => {
+                // in port
+                let args = copy_from_user(data as *const RvmVcpuWriteInputValueArgs)
+                    .ok_or(FsError::InvalidParam)?;
+                let vpid = args.vcpu_id as usize;
+                info!(
+                    "[RVM] ioctl RVM_VCPU_WRITE_INPUT_VALUE {:#x} {:#x?}",
+                    vpid, args
+                );
+                if let Some(vcpu) = self.vcpus.write().get_mut(&vpid) {
+                    vcpu.write_input_value(args.access_size, args.value)?;
                     Ok(0)
                 } else {
                     Err(FsError::InvalidParam)
