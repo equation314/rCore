@@ -469,7 +469,7 @@ pub fn vmexit_handler(
             exit_info.exit_reason,
             res,
             guest_state.dump(&vmcs),
-            gpm.read().fetch_data(
+            gpm.write().fetch_data(
                 vmcs.readXX(VmcsFieldXX::GUEST_CS_BASE) + exit_info.guest_rip,
                 exit_info.exit_instruction_length as usize
             ),

@@ -513,7 +513,7 @@ impl Vcpu {
                         let data = self
                             .guest
                             .gpm
-                            .read()
+                            .write()
                             .fetch_data(op.guest_paddr, op.access_size as usize);
                         IoValue::from_raw_parts(data.as_ptr(), op.access_size)
                     };
@@ -579,7 +579,7 @@ impl Vcpu {
             self.guest.gpm.write().write_data(op.guest_paddr, unsafe {
                 &value.buf[..(access_size as usize)]
             });
-            // FIXME: may need invalidate guest tlb
+            // FIXME: may need invalidate guest cache
 
             let mut ecx = self.vmx_state.guest_state.rcx & 0xFFFFFFFF;
             ecx -= 1;
