@@ -12,6 +12,7 @@ pub enum RvmExitPacketKind {
 }
 
 #[repr(C)]
+#[derive(Copy, Clone)]
 pub union IoValue {
     pub d_u8: u8,
     pub d_u16: u16,
@@ -20,12 +21,13 @@ pub union IoValue {
 }
 
 #[repr(C)]
-#[derive(Debug)]
+#[derive(Copy, Clone)]
 pub struct IoPacket {
     pub port: u16,
     pub access_size: u8,
     pub input: bool,
-    pub value: IoValue,
+    pub value_cnt: u8, // 多少个IoValue
+    pub values: [IoValue; 32],
 }
 
 #[repr(C)]
@@ -67,6 +69,14 @@ impl IoValue {
 impl Debug for IoValue {
     fn fmt(&self, f: &mut Formatter) -> Result {
         write!(f, "IoValue {{ 0x{:08x} }}", unsafe { self.d_u32 })
+    }
+}
+
+impl Debug for IoPacket {
+    fn fmt(&self, f: &mut Formatter) -> Result {
+        write!(f, "IoPacket {{ port: 0x{:x}, access_size: 0x{:x}, input: {}, value_cnt: {}, values: [{:?}, ...], }}", 
+                self.port, self.access_size, self.input, self.value_cnt, self.values[0]
+            )
     }
 }
 

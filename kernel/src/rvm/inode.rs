@@ -2,6 +2,7 @@
 
 use alloc::{boxed::Box, collections::BTreeMap, sync::Arc};
 use core::any::Any;
+use core::fmt::{Debug, Formatter};
 use spin::RwLock;
 
 use rcore_fs::vfs::*;
@@ -68,11 +69,19 @@ struct RvmVcpuWriteStateArgs {
 }
 
 #[repr(C)]
-#[derive(Debug)]
 struct RvmVcpuWriteInputValueArgs {
     vcpu_id: u16,
     access_size: u8,
-    value: IoValue,
+    value_cnt: u8,
+    values: [IoValue; 32],
+}
+
+impl Debug for RvmVcpuWriteInputValueArgs {
+    fn fmt(&self, f: &mut Formatter) -> core::fmt::Result {
+        write!(f, "RvmVcpuWriteInputValueArgs {{ vcpu_id: 0x{:x}, access_size: 0x{:x}, value_cnt: {}, values: [{:?}, ...], }}", 
+                self.vcpu_id, self.access_size, self.value_cnt, self.values[0]
+            )
+    }
 }
 
 impl INode for RvmINode {
@@ -211,7 +220,7 @@ impl INode for RvmINode {
                     vpid, args
                 );
                 if let Some(vcpu) = self.vcpus.write().get_mut(&vpid) {
-                    vcpu.write_input_value(args.access_size, args.value)?;
+                    vcpu.write_input_value(args.access_size, args.value_cnt, args.values)?;
                     Ok(0)
                 } else {
                     Err(FsError::InvalidParam)

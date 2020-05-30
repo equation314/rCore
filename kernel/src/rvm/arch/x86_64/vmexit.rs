@@ -333,19 +333,46 @@ fn handle_io_instruction(
             vmcs.readXX(VmcsFieldXX::GUEST_ES_BASE),
             guest_state.rdi
         );
+        warn!(
+            "[RVM] es base is 0x{:x}, es selector is 0x{:x}, rdi is 0x{:x}, rsi is 0x{:x}",
+            vmcs.readXX(VmcsFieldXX::GUEST_ES_BASE),
+            vmcs.read16(VmcsField16::GUEST_ES_SELECTOR),
+            guest_state.rdi,
+            guest_state.rsi
+        );
         let guest_cr0 = vmcs.readXX(VmcsFieldXX::GUEST_CR0);
         if (guest_cr0 & 0x80000000) != 0 {
             warn!("[RVM] not support string(in/out) repeat instruction when page table is enabled");
-            return Err(RvmError::NotSupported);
-        }
-        *out_repeating = Repeating::InOut(RepeatingInOut {
-            port: io_info.port,
-            access_size: io_info.access_size,
-            input: io_info.input,
+            // return Err(RvmError::NotSupported);
 
-            guest_paddr: (vmcs.readXX(VmcsFieldXX::GUEST_ES_BASE) << 4) + guest_state.rdi as usize,
-        });
-        return Ok(None);
+            *out_repeating = Repeating::InOut(RepeatingInOut {
+                port: io_info.port,
+                access_size: io_info.access_size,
+                input: io_info.input,
+
+                // FIXME: wrong guest_paddr
+                guest_paddr: if io_info.input {
+                    (guest_state.rdi as usize) - 0xC0000000 // only for ucore
+                } else {
+                    (guest_state.rsi as usize) - 0xC0000000 // only for ucore
+                },
+            });
+            return Ok(None);
+        } else {
+            *out_repeating = Repeating::InOut(RepeatingInOut {
+                port: io_info.port,
+                access_size: io_info.access_size,
+                input: io_info.input,
+
+                // FIXME: wrong guest_paddr
+                guest_paddr: if io_info.input {
+                    (vmcs.readXX(VmcsFieldXX::GUEST_ES_BASE) << 4) + guest_state.rdi as usize
+                } else {
+                    (vmcs.readXX(VmcsFieldXX::GUEST_DS_BASE) << 4) + guest_state.rsi as usize
+                },
+            });
+            return Ok(None);
+        }
 
         // warn!("[RVM] VM exit: Unsupported IO instruction: {:#x?}", io_info);
         // return Err(RvmError::NotSupported);
@@ -365,13 +392,16 @@ fn handle_io_instruction(
             io_info.access_size,
         )
     };
+    let mut values = [IoValue::default(); 32];
+    values[0] = value;
     Ok(Some(RvmExitPacket::new_io_packet(
         trap.key,
         IoPacket {
             port: io_info.port,
             access_size: io_info.access_size,
             input: io_info.input,
-            value,
+            value_cnt: 1,
+            values,
         },
     )))
 }

@@ -153,10 +153,11 @@ impl GuestPhysicalMemorySet {
     }
 
     pub fn fetch_data(&mut self, guest_paddr: GuestPhysAddr, len: usize) -> Vec<u8> {
+        assert!((guest_paddr & (PAGE_SIZE - 1)) + len <= PAGE_SIZE);
         let mut buf = vec![0; len];
         let mut entry = self.rvm_page_table.get_entry(guest_paddr);
         if !entry.is_present() {
-            self.handle_page_fault(guest_paddr);
+            assert!(self.handle_page_fault(guest_paddr));
             entry = self.rvm_page_table.get_entry(guest_paddr);
         }
         let host_paddr = entry.get_physical_address() + (guest_paddr & (PAGE_SIZE - 1));
@@ -169,7 +170,7 @@ impl GuestPhysicalMemorySet {
         assert!((guest_paddr & (PAGE_SIZE - 1)) + data.len() <= PAGE_SIZE);
         let mut entry = self.rvm_page_table.get_entry(guest_paddr);
         if !entry.is_present() {
-            self.handle_page_fault(guest_paddr);
+            assert!(self.handle_page_fault(guest_paddr));
             entry = self.rvm_page_table.get_entry(guest_paddr);
         }
         let host_paddr = entry.get_physical_address() + (guest_paddr & (PAGE_SIZE - 1));

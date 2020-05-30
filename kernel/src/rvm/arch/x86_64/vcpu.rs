@@ -507,27 +507,53 @@ impl Vcpu {
                     self.repeating = Repeating::None;
                     info!("[RVM] repeating end");
                 } else {
-                    let value = if op.input {
-                        IoValue::default()
-                    } else {
-                        let data = self
-                            .guest
-                            .gpm
-                            .write()
-                            .fetch_data(op.guest_paddr, op.access_size as usize);
-                        IoValue::from_raw_parts(data.as_ptr(), op.access_size)
-                    };
+                    let mut value_cnt = 32;
+                    if ecx < value_cnt {
+                        value_cnt = ecx;
+                    }
+
+                    let mut values = [IoValue::default(); 32];
+                    for i in 0..value_cnt {
+                        if op.input == false {
+                            let data = self.guest.gpm.write().fetch_data(
+                                op.guest_paddr + (i as usize) * (op.access_size as usize),
+                                op.access_size as usize,
+                            );
+                            values[i as usize] =
+                                IoValue::from_raw_parts(data.as_ptr(), op.access_size);
+                        }
+                    }
+
                     let trap = match self.guest.traps.read().find(TrapKind::Io, op.port as usize) {
                         Some(t) => t,
                         None => panic!("[RVM] Error in repeat operation: can not find trap"),
                     };
+                    if op.input == false {
+                        info!(
+                            "[RVM] write value_cnt is {}, data is 0x{:x}, op.guest_paddr is 0x{:x}",
+                            value_cnt,
+                            unsafe { values[0].d_u32 },
+                            op.guest_paddr
+                        );
+
+                        let mut ecx = self.vmx_state.guest_state.rcx & 0xFFFFFFFF;
+                        assert!(ecx >= (value_cnt as u64));
+                        ecx -= value_cnt as u64;
+                        self.vmx_state.guest_state.rcx = ecx;
+                        let mut op = op;
+                        op.guest_paddr += (op.access_size as usize) * (value_cnt as usize);
+                        self.repeating = Repeating::InOut(op);
+                        self.vmx_state.guest_state.rsi +=
+                            (op.access_size as u64) * (value_cnt as u64);
+                    }
                     return Ok(RvmExitPacket::new_io_packet(
                         trap.key,
                         IoPacket {
                             port: op.port,
                             access_size: op.access_size,
                             input: op.input,
-                            value,
+                            value_cnt: value_cnt as u8,
+                            values,
                         },
                     ));
                 }
@@ -571,25 +597,35 @@ impl Vcpu {
         }
     }
 
-    pub fn write_input_value(&mut self, access_size: u8, value: IoValue) -> RvmResult<()> {
+    pub fn write_input_value(
+        &mut self,
+        access_size: u8,
+        value_cnt: u8,
+        values: [IoValue; 32],
+    ) -> RvmResult<()> {
         if let Repeating::InOut(op) = self.repeating {
             assert_eq!(access_size, op.access_size);
 
-            info!("[RVM] write repeat input value, access_size = {}, value = 0x{:x}, guest_paddr = 0x{:x}", access_size, unsafe { value.d_u32 }, op.guest_paddr);
-            self.guest.gpm.write().write_data(op.guest_paddr, unsafe {
-                &value.buf[..(access_size as usize)]
-            });
-            // FIXME: may need invalidate guest cache
+            info!("[RVM] write repeat input value, access_size = {}, value_cnt = {}, values[0] = 0x{:x}, op.guest_paddr = 0x{:x}", access_size, value_cnt, unsafe { values[0].d_u32 }, op.guest_paddr);
 
+            for i in 0..value_cnt {
+                self.guest.gpm.write().write_data(
+                    op.guest_paddr + (i as usize) * (access_size as usize),
+                    unsafe { &values[i as usize].buf[..(access_size as usize)] },
+                );
+            }
             let mut ecx = self.vmx_state.guest_state.rcx & 0xFFFFFFFF;
-            ecx -= 1;
+            assert!(ecx >= (value_cnt as u64));
+            ecx -= value_cnt as u64;
             self.vmx_state.guest_state.rcx = ecx;
-
             let mut op = op;
-            op.guest_paddr += access_size as usize;
+            op.guest_paddr += (access_size as usize) * (value_cnt as usize);
             self.repeating = Repeating::InOut(op);
+            self.vmx_state.guest_state.rdi += (access_size as u64) * (value_cnt as u64);
+        // FIXME: may need invalidate guest cache
         } else {
-            self.vmx_state.guest_state.rax = unsafe { value.d_u32 as u64 };
+            assert_eq!(value_cnt, 1);
+            self.vmx_state.guest_state.rax = unsafe { values[0].d_u32 as u64 };
         }
         Ok(())
     }
