@@ -92,6 +92,11 @@ fn handle_external_interrupt(vmcs: &AutoVmcs) -> ExitResult {
     Ok(None)
 }
 
+fn handle_interrupt_window(vmcs: &mut AutoVmcs) -> ExitResult {
+    vmcs.interrupt_window_exiting(false);
+    Ok(None)
+}
+
 fn handle_cpuid(
     exit_info: &ExitInfo,
     vmcs: &mut AutoVmcs,
@@ -484,6 +489,7 @@ pub fn vmexit_handler(
 
     let res = match exit_info.exit_reason {
         ExitReason::EXTERNAL_INTERRUPT => handle_external_interrupt(vmcs),
+        ExitReason::INTERRUPT_WINDOW => handle_interrupt_window(vmcs),
         ExitReason::CPUID => handle_cpuid(&exit_info, vmcs, guest_state),
         ExitReason::VMCALL => handle_vmcall(&exit_info, vmcs, guest_state),
         ExitReason::IO_INSTRUCTION => {

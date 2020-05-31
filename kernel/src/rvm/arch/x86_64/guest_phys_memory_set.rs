@@ -22,7 +22,7 @@ pub type HostVirtAddr = usize;
 #[derive(Debug)]
 struct GuestPhysicalMemoryArea {
     start_paddr: GuestPhysAddr,
-    end_paddr: usize,
+    end_paddr: GuestPhysAddr,
 }
 
 impl GuestPhysicalMemoryArea {

@@ -4,6 +4,7 @@
 #[path = "arch/x86_64/mod.rs"]
 mod arch;
 mod inode;
+mod interrupt;
 mod packet;
 mod trap_map;
 

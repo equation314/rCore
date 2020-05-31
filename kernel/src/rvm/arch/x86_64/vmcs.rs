@@ -134,7 +134,7 @@ pub enum VmcsField32 {
     VM_EXIT_MSR_LOAD_COUNT = 0x00004010,
     VM_ENTRY_CONTROLS = 0x00004012,
     VM_ENTRY_MSR_LOAD_COUNT = 0x00004014,
-    VM_ENTRY_INTR_INFO_FIELD = 0x00004016,
+    VM_ENTRY_INTR_INFO = 0x00004016,
     VM_ENTRY_EXCEPTION_ERROR_CODE = 0x00004018,
     VM_ENTRY_INSTRUCTION_LEN = 0x0000401a,
     TPR_THRESHOLD = 0x0000401c,
@@ -145,7 +145,7 @@ pub enum VmcsField32 {
     VM_EXIT_REASON = 0x00004402,
     VM_EXIT_INTR_INFO = 0x00004404,
     VM_EXIT_INTR_ERROR_CODE = 0x00004406,
-    IDT_VECTORING_INFO_FIELD = 0x00004408,
+    IDT_VECTORING_INFO = 0x00004408,
     IDT_VECTORING_ERROR_CODE = 0x0000440a,
     VM_EXIT_INSTRUCTION_LEN = 0x0000440c,
     VMX_INSTRUCTION_INFO = 0x0000440e,
@@ -434,6 +434,98 @@ impl Default for GuestRegisterAccessRights {
     }
 }
 
+bitflags! {
+    /// The IA-32 architecture includes features that permit certain events to
+    /// be blocked for a period of time. This field contains information about
+    /// such blocking.
+    pub struct InterruptibilityState: u32 {
+        /// Execution of STI with RFLAGS.IF = 0 blocks maskable interrupts on
+        /// the instruction boundary following its execution. Setting this bit
+        /// indicates that this blocking is in effect.
+        const BLOCKING_BY_STI       = 1 << 0;
+        /// Execution of a MOV to SS or a POP to SS blocks or suppresses certain
+        /// debug exceptions as well as interrupts (maskable and nonmaskable) on
+        /// the instruction boundary following its execution. Setting this bit
+        /// indicates that this blocking is in effect. by MOV SS,” but it applies
+        /// equally to POP SS.
+        const BLOCKING_BY_MOV_SS    = 1 << 1;
+        /// System-management interrupts (SMIs) are disabled while the processor
+        /// is in system-management mode (SMM). Setting this bit indicates that
+        /// blocking of SMIs is in effect.
+        const BLOCKING_BY_SMI       = 1 << 2;
+        /// Delivery of a non-maskable interrupt (NMI) or a system-management
+        /// interrupt (SMI) blocks subsequent NMIs until the next execution of
+        /// IRET. See Section 25.3 for how this behavior of IRET may change in
+        /// VMX non-root operation. Setting this bit indicates that blocking of
+        /// NMIs is in effect. Clearing this bit does not imply that NMIs are
+        /// not (temporarily) blocked for other reasons.
+        const BLOCKING_BY_NMI       = 1 << 3;
+        /// Such VM exits includes those caused by interrupts, non-maskable
+        /// interrupts, system- management interrupts, INIT signals, and exceptions
+        /// occurring in enclave mode as well as exceptions encountered during
+        /// the delivery of such events incident to enclave mode.
+        const ENCLAVE_INTERRUPTION  = 1 << 4;
+    }
+}
+
+bitflags! {
+    /// This field provides details about the event to be injected.
+    struct InterruptionInfo: u32 {
+        /// External interrupt
+        const TYPE_EXTERNAL             = 0 << 8;
+        /// Non-maskable interrupt (NMI)
+        const TYPE_NMI                  = 2 << 8;
+        /// Hardware exception (e.g,. #PF)
+        const TYPE_HARD_EXCEPTION       = 3 << 8;
+        /// Software interrupt (INT n)
+        const TYPE_SOFT_INTR            = 4 << 8;
+        /// Privileged software exception (INT1)
+        const TYPE_PRIV_SOFT_EXCEPTION  = 5 << 8;
+        /// Software exception (INT3 or INTO)
+        const TYPE_SOFT_EXCEPTION       = 6 << 8;
+        /// Other event
+        const TYPE_OTHER                = 7 << 8;
+        /// Deliver error code
+        const ERROR_CODE                = 1 << 12;
+        /// Valid
+        const VALID                     = 1 << 31;
+    }
+}
+
+impl InterruptionInfo {
+    fn has_error_code(vector: u8) -> bool {
+        use crate::arch::interrupt::consts as int_num;
+        match vector {
+            int_num::DoubleFault
+            | int_num::InvalidTSS
+            | int_num::SegmentNotPresent
+            | int_num::StackSegmentFault
+            | int_num::GeneralProtectionFault
+            | int_num::PageFault
+            | int_num::AlignmentCheck => true,
+            _ => false,
+        }
+    }
+
+    fn from_vector(vector: u8) -> Self {
+        use crate::arch::interrupt::consts as int_num;
+        let mut info = unsafe { Self::from_bits_unchecked(vector as u32) } | Self::VALID;
+        match vector {
+            int_num::NonMaskableInterrupt => info |= Self::TYPE_NMI,
+            // From Volume 3, Section 24.8.3. A VMM should use type hardware exception for all
+            // exceptions other than breakpoints and overflows, which should be software exceptions.
+            int_num::Breakpoint | int_num::Overflow => info |= Self::TYPE_SOFT_EXCEPTION,
+            // From Volume 3, Section 6.15. All other vectors from 0 to 21 are exceptions.
+            0..=int_num::VirtualizationException => info |= Self::TYPE_HARD_EXCEPTION,
+            _ => {}
+        };
+        if Self::has_error_code(vector) {
+            info |= Self::ERROR_CODE;
+        }
+        info
+    }
+}
+
 /// Loads a VMCS within a given scope.
 #[derive(Debug)]
 pub struct AutoVmcs {
@@ -460,6 +552,24 @@ impl AutoVmcs {
 
     pub fn _invalidate(&mut self) {
         self.vmcs_paddr = 0;
+    }
+
+    pub fn interrupt_window_exiting(&mut self, enable: bool) {
+        let mut ctrl = unsafe {
+            CpuBasedVmExecControls::from_bits_unchecked(
+                self.read32(VmcsField32::CPU_BASED_VM_EXEC_CONTROL),
+            )
+        };
+        ctrl.set(CpuBasedVmExecControls::INTR_WINDOW_EXITING, enable);
+        self.write32(VmcsField32::CPU_BASED_VM_EXEC_CONTROL, ctrl.bits());
+    }
+
+    pub fn issue_interrupt(&mut self, vector: u8) {
+        let info = InterruptionInfo::from_vector(vector);
+        if info.contains(InterruptionInfo::ERROR_CODE) {
+            self.write32(VmcsField32::VM_ENTRY_EXCEPTION_ERROR_CODE, 0);
+        }
+        self.write32(VmcsField32::VM_ENTRY_INTR_INFO, info.bits());
     }
 
     pub fn read16(&self, field: VmcsField16) -> u16 {

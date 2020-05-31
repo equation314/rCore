@@ -15,7 +15,7 @@ use super::{
     vmexit::vmexit_handler,
     Guest,
 };
-use crate::arch::{gdt, idt};
+use crate::rvm::interrupt::{InterruptController, VirtualTimer};
 use crate::rvm::trap_map::TrapKind;
 use crate::rvm::{
     packet::{IoPacket, IoValue, RvmExitPacket},
@@ -104,6 +104,82 @@ struct VmxState {
     guest_state: GuestState,
 }
 
+/// Store the interruption state/virtual timer.
+#[derive(Debug)]
+struct InterruptState {
+    timer: VirtualTimer,
+    controller: InterruptController,
+}
+
+impl InterruptState {
+    fn new() -> Self {
+        Self {
+            timer: VirtualTimer::new(),
+            controller: InterruptController::new(u8::MAX as usize),
+        }
+    }
+
+    /// Set timer IRQ pending if timeout.
+    fn try_timer_irq(&mut self) {
+        if self.timer.enabled() && self.timer.tick(unsafe { crate::trap::TICK } as u64) {
+            self.controller.virtual_interrupt(self.timer.irq_num);
+        }
+    }
+
+    /// Injects an interrupt into the guest, if there is one pending.
+    fn try_inject_interrupt(&mut self, vmcs: &mut AutoVmcs) -> RvmResult<()> {
+        use crate::arch::interrupt::consts::*;
+        // Since hardware generated exceptions are delivered to the guest directly, the only exceptions
+        // we see here are those we generate in the VMM, e.g. GP faults in vmexit handlers. Therefore
+        // we simplify interrupt priority to 1) NMIs, 2) interrupts, and 3) generated exceptions. See
+        // Volume 3, Section 6.9, Table 6-2.
+        let vector = if self.controller.try_pop(NonMaskableInterrupt as usize) {
+            NonMaskableInterrupt
+        } else if let Some(vec) = self.controller.pop() {
+            // Pop scans vectors from highest to lowest, which will correctly pop interrupts before
+            // exceptions. All vectors <= VirtualizationException except the NMI vector are exceptions.
+            vec as u8
+        } else {
+            return Ok(());
+        };
+
+        if vector > VirtualizationException && vector < IRQ0 {
+            return Err(RvmError::NotSupported);
+        } else {
+            use bit_field::BitField;
+            use InterruptibilityState as IntrState;
+            let intr_state = IntrState::from_bits_truncate(
+                vmcs.read32(VmcsField32::GUEST_INTERRUPTIBILITY_STATE),
+            );
+            let can_inject_nmi = !intr_state.contains(IntrState::BLOCKING_BY_NMI)
+                && !intr_state.contains(IntrState::BLOCKING_BY_MOV_SS);
+            let can_inject_external_int = vmcs.readXX(VmcsFieldXX::GUEST_RFLAGS).get_bit(9)
+                && !intr_state.contains(IntrState::BLOCKING_BY_STI)
+                && !intr_state.contains(IntrState::BLOCKING_BY_MOV_SS);
+            if (vector >= IRQ0 && !can_inject_external_int)
+                || (vector == NonMaskableInterrupt && !can_inject_nmi)
+            {
+                self.controller.virtual_interrupt(vector as usize);
+                // If interrupts are disabled, we set VM exit on interrupt enable.
+                vmcs.interrupt_window_exiting(true);
+                return Ok(());
+            }
+        }
+
+        // If the vector is non-maskable or interrupts are enabled, we inject an interrupt.
+        vmcs.issue_interrupt(vector);
+
+        // Volume 3, Section 6.9: Lower priority exceptions are discarded; lower priority interrupts are
+        // held pending. Discarded exceptions are re-generated when the interrupt handler returns
+        // execution to the point in the program or task where the exceptions and/or interrupts
+        // occurred.
+        self.controller
+            .clear_and_keep(NonMaskableInterrupt as usize);
+
+        Ok(())
+    }
+}
+
 /// Represents a virtual CPU within a guest.
 #[derive(Debug)]
 pub struct Vcpu {
@@ -114,6 +190,7 @@ pub struct Vcpu {
     vmcs_page: VmxPage,
     host_msr_list: MsrList,
     guest_msr_list: MsrList,
+    interrupt_state: InterruptState,
     repeating: Repeating,
 }
 
@@ -151,6 +228,7 @@ impl Vcpu {
             vmcs_page,
             host_msr_list,
             guest_msr_list,
+            interrupt_state: InterruptState::new(),
             repeating: Repeating::None,
         }))
     }
@@ -188,6 +266,8 @@ impl Vcpu {
 
     /// Setup VMCS host state.
     unsafe fn init_vmcs_host(&self, vmcs: &mut AutoVmcs) -> RvmResult<()> {
+        use crate::arch::{gdt, idt};
+
         vmcs.write64(VmcsField64::HOST_IA32_PAT, Msr::new(MSR_IA32_PAT).read());
         vmcs.write64(VmcsField64::HOST_IA32_EFER, Msr::new(MSR_IA32_EFER).read());
 
@@ -372,7 +452,8 @@ impl Vcpu {
             Msr::new(MSR_IA32_VMX_TRUE_PROCBASED_CTLS).read(),
             Msr::new(MSR_IA32_VMX_PROCBASED_CTLS).read(),
             // Enable XXX
-            (CpuCtrl::HLT_EXITING
+            (CpuCtrl::INTR_WINDOW_EXITING
+                | CpuCtrl::HLT_EXITING
                 | CpuCtrl::VIRTUAL_TPR
                 | CpuCtrl::UNCOND_IO_EXITING
                 | CpuCtrl::USE_MSR_BITMAPS
@@ -386,7 +467,9 @@ impl Vcpu {
                 | CpuCtrl::CR8_STORE_EXITING)
                 .bits(),
         )?;
-        // TODO: InterruptWindowExiting?
+        // We only enable interrupt-window exiting above to ensure that the
+        // processor supports it for later use. So disable it for now.
+        vmcs.interrupt_window_exiting(false);
 
         // Setup VM-exit VMCS controls.
         vmcs.set_control(
@@ -559,7 +642,8 @@ impl Vcpu {
                 }
             }
 
-            // TODO: interrupt virtualization
+            self.interrupt_state.try_timer_irq();
+            self.interrupt_state.try_inject_interrupt(&mut vmcs)?;
             // TODO: save/restore guest extended registers (x87/SSE)
 
             // VM Entry
@@ -633,6 +717,13 @@ impl Vcpu {
     pub fn write_state(&mut self, rax: u64) -> RvmResult<()> {
         // TODO: write other states
         self.vmx_state.guest_state.rax = rax;
+        Ok(())
+    }
+
+    pub fn virtual_interrupt(&mut self, vector: u32) -> RvmResult<()> {
+        self.interrupt_state
+            .controller
+            .virtual_interrupt(vector as usize);
         Ok(())
     }
 }

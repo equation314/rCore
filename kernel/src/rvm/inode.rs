@@ -22,6 +22,7 @@ const RVM_VCPU_CREATE: u32 = RVM_IO + 0x11;
 const RVM_VCPU_RESUME: u32 = RVM_IO + 0x12;
 const RVM_VCPU_WRITE_STATE: u32 = RVM_IO + 0x13;
 const RVM_VCPU_WRITE_INPUT_VALUE: u32 = RVM_IO + 0x14;
+const RVM_VCPU_INTERRUPT: u32 = RVM_IO + 0x15;
 
 pub struct RvmINode {
     guests: RwLock<BTreeMap<usize, Arc<Box<Guest>>>>,
@@ -82,6 +83,13 @@ impl Debug for RvmVcpuWriteInputValueArgs {
                 self.vcpu_id, self.access_size, self.value_cnt, self.values[0]
             )
     }
+}
+
+#[repr(C)]
+#[derive(Debug)]
+struct RvmVcpuInterruptArgs {
+    vcpu_id: u16,
+    vector: u32,
 }
 
 impl INode for RvmINode {
@@ -221,6 +229,18 @@ impl INode for RvmINode {
                 );
                 if let Some(vcpu) = self.vcpus.write().get_mut(&vpid) {
                     vcpu.write_input_value(args.access_size, args.value_cnt, args.values)?;
+                    Ok(0)
+                } else {
+                    Err(FsError::InvalidParam)
+                }
+            }
+            RVM_VCPU_INTERRUPT => {
+                let args = copy_from_user(data as *const RvmVcpuInterruptArgs)
+                    .ok_or(FsError::InvalidParam)?;
+                let vpid = args.vcpu_id as usize;
+                info!("[RVM] ioctl RVM_VCPU_INTERRUPT {:#x} {:#x?}", vpid, args);
+                if let Some(vcpu) = self.vcpus.write().get_mut(&vpid) {
+                    vcpu.virtual_interrupt(args.vector)?;
                     Ok(0)
                 } else {
                     Err(FsError::InvalidParam)
