@@ -117,7 +117,7 @@ impl InterruptState {
     }
 
     /// Set timer IRQ pending if timeout.
-    fn try_timer_irq(&mut self) {
+    pub fn timer_irq(&mut self) {
         if self.timer.inner.enabled() && self.timer.inner.tick() {
             self.controller
                 .virtual_interrupt(PitTimer::IRQ_NUM as usize);
@@ -564,7 +564,6 @@ impl Vcpu {
         loop {
             let mut vmcs = AutoVmcs::new(self.vmcs_page.phys_addr())?;
 
-            self.interrupt_state.try_timer_irq();
             self.interrupt_state.try_inject_interrupt(&mut vmcs)?;
             // TODO: save/restore guest extended registers (x87/SSE)
 
@@ -591,8 +590,7 @@ impl Vcpu {
                 &self.guest.traps,
             )? {
                 Some(packet) => return Ok(packet), // forward to user mode handler
-                // None => continue,
-                None => return Ok(RvmExitPacket::new_none_packet()),
+                None => continue,
             }
         }
     }

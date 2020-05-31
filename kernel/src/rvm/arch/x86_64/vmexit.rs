@@ -99,7 +99,7 @@ impl IoInfo {
     }
 }
 
-fn handle_external_interrupt(vmcs: &AutoVmcs) -> ExitResult {
+fn handle_external_interrupt(vmcs: &AutoVmcs, interrupt_state: &mut InterruptState) -> ExitResult {
     let info = ExitInterruptionInfo::from(vmcs);
     trace!("[RVM] VM exit: External interrupt {:#x?}", info);
     debug_assert!(info.valid);
@@ -108,6 +108,16 @@ fn handle_external_interrupt(vmcs: &AutoVmcs) -> ExitResult {
         fn manual_trap(vector: usize);
     }
     unsafe { manual_trap(info.vector as usize) };
+
+    use crate::arch::interrupt::consts as int_num;
+    match info.vector - int_num::IRQ0 {
+        int_num::Timer => interrupt_state.timer_irq(),
+        int_num::COM1 => interrupt_state
+            .controller
+            .virtual_interrupt(info.vector as usize),
+        _ => {}
+    };
+
     Ok(None)
 }
 
@@ -460,7 +470,7 @@ pub fn vmexit_handler(
     );
 
     let res = match exit_info.exit_reason {
-        ExitReason::EXTERNAL_INTERRUPT => handle_external_interrupt(vmcs),
+        ExitReason::EXTERNAL_INTERRUPT => handle_external_interrupt(vmcs, interrupt_state),
         ExitReason::INTERRUPT_WINDOW => handle_interrupt_window(vmcs),
         ExitReason::CPUID => handle_cpuid(&exit_info, vmcs, guest_state),
         ExitReason::VMCALL => handle_vmcall(&exit_info, vmcs, guest_state),
