@@ -6,6 +6,7 @@ use core::fmt::{Debug, Formatter, Result};
 #[derive(Debug)]
 #[allow(dead_code)]
 pub enum RvmExitPacketKind {
+    None = 0,
     GuestIo = 1,
     GuestMmio = 2,
     GuestVcpu = 3,
@@ -41,6 +42,15 @@ pub struct RvmExitPacket {
 }
 
 impl RvmExitPacket {
+    pub fn new_none_packet() -> Self {
+        Self {
+            kind: RvmExitPacketKind::None,
+            key: 0,
+            inner: RvmExitPacketInnner {
+                mmio: MmioPacket { addr: 0 },
+            },
+        }
+    }
     pub fn new_io_packet(key: u64, io_packet: IoPacket) -> Self {
         Self {
             kind: RvmExitPacketKind::GuestIo,

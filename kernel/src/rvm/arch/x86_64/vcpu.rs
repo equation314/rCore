@@ -591,7 +591,8 @@ impl Vcpu {
                 &self.guest.traps,
             )? {
                 Some(packet) => return Ok(packet), // forward to user mode handler
-                None => continue,
+                // None => continue,
+                None => return Ok(RvmExitPacket::new_none_packet()),
             }
         }
     }
