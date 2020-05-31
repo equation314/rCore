@@ -1,3 +1,5 @@
+//! Some structures to manage traps caused by MMIO/PIO.
+
 use alloc::collections::BTreeMap;
 use core::convert::TryFrom;
 
