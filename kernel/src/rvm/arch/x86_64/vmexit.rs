@@ -7,10 +7,7 @@ use spin::RwLock;
 use super::exit_reason::ExitReason;
 use super::feature::*;
 use super::guest_phys_memory_set::GuestPhysicalMemorySet;
-use super::{
-    vcpu::{GuestState, Repeating, RepeatingInOut},
-    vmcs::*,
-};
+use super::{vcpu::GuestState, vmcs::*};
 use crate::rvm::packet::*;
 use crate::rvm::trap_map::{TrapKind, TrapMap};
 use crate::rvm::{RvmError, RvmResult};
@@ -301,14 +298,15 @@ fn handle_io_instruction(
     vmcs: &mut AutoVmcs,
     guest_state: &mut GuestState,
     traps: &RwLock<TrapMap>,
-    out_repeating: &mut Repeating,
 ) -> ExitResult {
     let io_info = IoInfo::from(exit_info.exit_qualification);
     info!(
-        "[RVM] VM exit: IO instruction @ RIP({:#x}): {} {:#x?}",
+        "[RVM] VM exit: IO instruction @ RIP({:#x}): {} {:#x?}, repeat = {}, string = {}",
         exit_info.guest_rip,
         if io_info.input { "IN" } else { "OUT" },
-        io_info.port
+        io_info.port,
+        io_info.repeat,
+        io_info.string
     );
 
     exit_info.next_rip(vmcs);
@@ -326,82 +324,19 @@ fn handle_io_instruction(
         }
     };
 
-    if io_info.string || io_info.repeat {
-        info!(
-            "[RVM] VM exit: repeat instruction, ecx = {}, {}:{}",
-            guest_state.rcx,
-            vmcs.readXX(VmcsFieldXX::GUEST_ES_BASE),
-            guest_state.rdi
-        );
-        warn!(
-            "[RVM] es base is 0x{:x}, es selector is 0x{:x}, rdi is 0x{:x}, rsi is 0x{:x}",
-            vmcs.readXX(VmcsFieldXX::GUEST_ES_BASE),
-            vmcs.read16(VmcsField16::GUEST_ES_SELECTOR),
-            guest_state.rdi,
-            guest_state.rsi
-        );
-        let guest_cr0 = vmcs.readXX(VmcsFieldXX::GUEST_CR0);
-        if (guest_cr0 & 0x80000000) != 0 {
-            warn!("[RVM] not support string(in/out) repeat instruction when page table is enabled");
-            // return Err(RvmError::NotSupported);
-
-            *out_repeating = Repeating::InOut(RepeatingInOut {
-                port: io_info.port,
-                access_size: io_info.access_size,
-                input: io_info.input,
-
-                // FIXME: wrong guest_paddr
-                guest_paddr: if io_info.input {
-                    (guest_state.rdi as usize) - 0xC0000000 // only for ucore
-                } else {
-                    (guest_state.rsi as usize) - 0xC0000000 // only for ucore
-                },
-            });
-            return Ok(None);
-        } else {
-            *out_repeating = Repeating::InOut(RepeatingInOut {
-                port: io_info.port,
-                access_size: io_info.access_size,
-                input: io_info.input,
-
-                // FIXME: wrong guest_paddr
-                guest_paddr: if io_info.input {
-                    (vmcs.readXX(VmcsFieldXX::GUEST_ES_BASE) << 4) + guest_state.rdi as usize
-                } else {
-                    (vmcs.readXX(VmcsFieldXX::GUEST_DS_BASE) << 4) + guest_state.rsi as usize
-                },
-            });
-            return Ok(None);
-        }
-
-        // warn!("[RVM] VM exit: Unsupported IO instruction: {:#x?}", io_info);
-        // return Err(RvmError::NotSupported);
-    }
-
     info!(
-        "[RVM] VM exit: Handling IO port {:#x} with {:#x?}, value: {:#x}",
+        "[RVM] VM exit: Handling IO port {:#x} with {:#x?}, rax value: {:#x}",
         io_info.port, trap, guest_state.rax as u8
     );
 
-    let value = if io_info.input {
-        guest_state.rax = 0;
-        IoValue::default()
-    } else {
-        IoValue::from_raw_parts(
-            &guest_state.rax as *const _ as *const u8,
-            io_info.access_size,
-        )
-    };
-    let mut values = [IoValue::default(); 32];
-    values[0] = value;
     Ok(Some(RvmExitPacket::new_io_packet(
         trap.key,
         IoPacket {
             port: io_info.port,
             access_size: io_info.access_size,
             input: io_info.input,
-            value_cnt: 1,
-            values,
+            string: io_info.string,
+            repeat: io_info.repeat,
         },
     )))
 }
@@ -473,7 +408,6 @@ pub fn vmexit_handler(
     guest_state: &mut GuestState,
     gpm: &Arc<RwLock<GuestPhysicalMemorySet>>,
     traps: &RwLock<TrapMap>,
-    out_repeating: &mut Repeating,
 ) -> ExitResult {
     let exit_info = ExitInfo::new(vmcs);
     trace!(
@@ -486,9 +420,7 @@ pub fn vmexit_handler(
         ExitReason::EXTERNAL_INTERRUPT => handle_external_interrupt(vmcs),
         ExitReason::CPUID => handle_cpuid(&exit_info, vmcs, guest_state),
         ExitReason::VMCALL => handle_vmcall(&exit_info, vmcs, guest_state),
-        ExitReason::IO_INSTRUCTION => {
-            handle_io_instruction(&exit_info, vmcs, guest_state, traps, out_repeating)
-        }
+        ExitReason::IO_INSTRUCTION => handle_io_instruction(&exit_info, vmcs, guest_state, traps),
         ExitReason::EPT_VIOLATION => handle_ept_violation(&exit_info, vmcs, gpm, traps),
         _ => Err(RvmError::NotSupported),
     };

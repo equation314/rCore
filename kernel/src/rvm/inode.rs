@@ -2,13 +2,12 @@
 
 use alloc::{boxed::Box, collections::BTreeMap, sync::Arc};
 use core::any::Any;
-use core::fmt::{Debug, Formatter};
 use spin::RwLock;
 
 use rcore_fs::vfs::*;
 
 use super::arch::{self, Guest, Vcpu};
-use super::packet::{IoValue, RvmExitPacket};
+use super::packet::RvmExitPacket;
 use crate::memory::copy_from_user;
 
 const MAX_GUEST_NUM: usize = 64;
@@ -21,7 +20,7 @@ const RVM_GUEST_SET_TRAP: u32 = RVM_IO + 0x03;
 const RVM_VCPU_CREATE: u32 = RVM_IO + 0x11;
 const RVM_VCPU_RESUME: u32 = RVM_IO + 0x12;
 const RVM_VCPU_WRITE_STATE: u32 = RVM_IO + 0x13;
-const RVM_VCPU_WRITE_INPUT_VALUE: u32 = RVM_IO + 0x14;
+const RVM_VCPU_READ_STATE: u32 = RVM_IO + 0x14;
 
 pub struct RvmINode {
     guests: RwLock<BTreeMap<usize, Arc<Box<Guest>>>>,
@@ -60,28 +59,31 @@ struct RvmVcpuResumeArgs {
     packet: RvmExitPacket,
 }
 
-// TODO: write other registers
 #[repr(C)]
 #[derive(Debug)]
-struct RvmVcpuWriteStateArgs {
-    vcpu_id: u16,
-    rax: u64,
+pub struct RvmGuestState {
+    pub rax: u64,
+    pub rcx: u64,
+    pub rdx: u64,
+    pub rbx: u64,
+    pub rbp: u64,
+    pub rsi: u64,
+    pub rdi: u64,
+    pub r8: u64,
+    pub r9: u64,
+    pub r10: u64,
+    pub r11: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
 }
 
 #[repr(C)]
-struct RvmVcpuWriteInputValueArgs {
+#[derive(Debug)]
+struct RvmVcpuStateArgs {
     vcpu_id: u16,
-    access_size: u8,
-    value_cnt: u8,
-    values: [IoValue; 32],
-}
-
-impl Debug for RvmVcpuWriteInputValueArgs {
-    fn fmt(&self, f: &mut Formatter) -> core::fmt::Result {
-        write!(f, "RvmVcpuWriteInputValueArgs {{ vcpu_id: 0x{:x}, access_size: 0x{:x}, value_cnt: {}, values: [{:?}, ...], }}", 
-                self.vcpu_id, self.access_size, self.value_cnt, self.values[0]
-            )
-    }
+    guest_state: RvmGuestState,
 }
 
 impl INode for RvmINode {
@@ -199,28 +201,26 @@ impl INode for RvmINode {
                 }
             }
             RVM_VCPU_WRITE_STATE => {
-                let args = copy_from_user(data as *const RvmVcpuWriteStateArgs)
-                    .ok_or(FsError::InvalidParam)?;
+                let args =
+                    copy_from_user(data as *const RvmVcpuStateArgs).ok_or(FsError::InvalidParam)?;
                 let vpid = args.vcpu_id as usize;
                 info!("[RVM] ioctl RVM_VCPU_WRITE_STATE {:#x} {:#x?}", vpid, args);
                 if let Some(vcpu) = self.vcpus.write().get_mut(&vpid) {
-                    vcpu.write_state(args.rax)?;
+                    vcpu.write_state(args.guest_state)?;
                     Ok(0)
                 } else {
                     Err(FsError::InvalidParam)
                 }
             }
-            RVM_VCPU_WRITE_INPUT_VALUE => {
-                // in port
-                let args = copy_from_user(data as *const RvmVcpuWriteInputValueArgs)
-                    .ok_or(FsError::InvalidParam)?;
+            RVM_VCPU_READ_STATE => {
+                let args =
+                    copy_from_user(data as *const RvmVcpuStateArgs).ok_or(FsError::InvalidParam)?;
                 let vpid = args.vcpu_id as usize;
-                info!(
-                    "[RVM] ioctl RVM_VCPU_WRITE_INPUT_VALUE {:#x} {:#x?}",
-                    vpid, args
-                );
+                info!("[RVM] ioctl RVM_VCPU_READ_STATE {:#x}", vpid);
                 if let Some(vcpu) = self.vcpus.write().get_mut(&vpid) {
-                    vcpu.write_input_value(args.access_size, args.value_cnt, args.values)?;
+                    // FIXME: implement copy to user
+                    let mut args = unsafe { &mut *(data as *mut RvmVcpuStateArgs) };
+                    args.guest_state = vcpu.read_state()?;
                     Ok(0)
                 } else {
                     Err(FsError::InvalidParam)

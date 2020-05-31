@@ -16,11 +16,7 @@ use super::{
     Guest,
 };
 use crate::arch::{gdt, idt};
-use crate::rvm::trap_map::TrapKind;
-use crate::rvm::{
-    packet::{IoPacket, IoValue, RvmExitPacket},
-    RvmError, RvmResult,
-};
+use crate::rvm::{inode::RvmGuestState, packet::RvmExitPacket, RvmError, RvmResult};
 
 /// Holds the register state used to restore a host.
 #[repr(C)]
@@ -114,23 +110,6 @@ pub struct Vcpu {
     vmcs_page: VmxPage,
     host_msr_list: MsrList,
     guest_msr_list: MsrList,
-    repeating: Repeating,
-}
-
-/// Represents a repeat operation
-#[derive(Debug, Clone, Copy)]
-pub enum Repeating {
-    None,
-    InOut(RepeatingInOut),
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct RepeatingInOut {
-    pub port: u16,
-    pub access_size: u8,
-    pub input: bool,
-
-    pub guest_paddr: usize,
 }
 
 impl Vcpu {
@@ -151,7 +130,6 @@ impl Vcpu {
             vmcs_page,
             host_msr_list,
             guest_msr_list,
-            repeating: Repeating::None,
         }))
     }
 
@@ -501,64 +479,6 @@ impl Vcpu {
         loop {
             let mut vmcs = AutoVmcs::new(self.vmcs_page.phys_addr())?;
 
-            if let Repeating::InOut(op) = self.repeating {
-                let ecx = self.vmx_state.guest_state.rcx & 0xFFFFFFFF;
-                if ecx == 0 {
-                    self.repeating = Repeating::None;
-                    info!("[RVM] repeating end");
-                } else {
-                    let mut value_cnt = 32;
-                    if ecx < value_cnt {
-                        value_cnt = ecx;
-                    }
-
-                    let mut values = [IoValue::default(); 32];
-                    for i in 0..value_cnt {
-                        if op.input == false {
-                            let data = self.guest.gpm.write().fetch_data(
-                                op.guest_paddr + (i as usize) * (op.access_size as usize),
-                                op.access_size as usize,
-                            );
-                            values[i as usize] =
-                                IoValue::from_raw_parts(data.as_ptr(), op.access_size);
-                        }
-                    }
-
-                    let trap = match self.guest.traps.read().find(TrapKind::Io, op.port as usize) {
-                        Some(t) => t,
-                        None => panic!("[RVM] Error in repeat operation: can not find trap"),
-                    };
-                    if op.input == false {
-                        info!(
-                            "[RVM] write value_cnt is {}, data is 0x{:x}, op.guest_paddr is 0x{:x}",
-                            value_cnt,
-                            unsafe { values[0].d_u32 },
-                            op.guest_paddr
-                        );
-
-                        let mut ecx = self.vmx_state.guest_state.rcx & 0xFFFFFFFF;
-                        assert!(ecx >= (value_cnt as u64));
-                        ecx -= value_cnt as u64;
-                        self.vmx_state.guest_state.rcx = ecx;
-                        let mut op = op;
-                        op.guest_paddr += (op.access_size as usize) * (value_cnt as usize);
-                        self.repeating = Repeating::InOut(op);
-                        self.vmx_state.guest_state.rsi +=
-                            (op.access_size as u64) * (value_cnt as u64);
-                    }
-                    return Ok(RvmExitPacket::new_io_packet(
-                        trap.key,
-                        IoPacket {
-                            port: op.port,
-                            access_size: op.access_size,
-                            input: op.input,
-                            value_cnt: value_cnt as u8,
-                            values,
-                        },
-                    ));
-                }
-            }
-
             // TODO: interrupt virtualization
             // TODO: save/restore guest extended registers (x87/SSE)
 
@@ -577,63 +497,55 @@ impl Vcpu {
 
             // VM Exit
             self.vmx_state.resume = true;
-            let mut out_repeating = Repeating::None;
             match vmexit_handler(
                 &mut vmcs,
                 &mut self.vmx_state.guest_state,
                 &self.guest.gpm,
                 &self.guest.traps,
-                &mut out_repeating,
             )? {
                 Some(packet) => return Ok(packet), // forward to user mode handler
-                None => {
-                    if let Repeating::InOut(x) = out_repeating {
-                        info!("[RVM] Repeating: {:?}", x);
-                        self.repeating = out_repeating;
-                    }
-                    continue;
-                }
+                None => continue,
             }
         }
     }
 
-    pub fn write_input_value(
-        &mut self,
-        access_size: u8,
-        value_cnt: u8,
-        values: [IoValue; 32],
-    ) -> RvmResult<()> {
-        if let Repeating::InOut(op) = self.repeating {
-            assert_eq!(access_size, op.access_size);
-
-            info!("[RVM] write repeat input value, access_size = {}, value_cnt = {}, values[0] = 0x{:x}, op.guest_paddr = 0x{:x}", access_size, value_cnt, unsafe { values[0].d_u32 }, op.guest_paddr);
-
-            for i in 0..value_cnt {
-                self.guest.gpm.write().write_data(
-                    op.guest_paddr + (i as usize) * (access_size as usize),
-                    unsafe { &values[i as usize].buf[..(access_size as usize)] },
-                );
-            }
-            let mut ecx = self.vmx_state.guest_state.rcx & 0xFFFFFFFF;
-            assert!(ecx >= (value_cnt as u64));
-            ecx -= value_cnt as u64;
-            self.vmx_state.guest_state.rcx = ecx;
-            let mut op = op;
-            op.guest_paddr += (access_size as usize) * (value_cnt as usize);
-            self.repeating = Repeating::InOut(op);
-            self.vmx_state.guest_state.rdi += (access_size as u64) * (value_cnt as u64);
-        // FIXME: may need invalidate guest cache
-        } else {
-            assert_eq!(value_cnt, 1);
-            self.vmx_state.guest_state.rax = unsafe { values[0].d_u32 as u64 };
-        }
+    pub fn write_state(&mut self, guest_state: RvmGuestState) -> RvmResult<()> {
+        self.vmx_state.guest_state.rax = guest_state.rax;
+        self.vmx_state.guest_state.rcx = guest_state.rcx;
+        self.vmx_state.guest_state.rdx = guest_state.rdx;
+        self.vmx_state.guest_state.rbx = guest_state.rbx;
+        self.vmx_state.guest_state.rbp = guest_state.rbp;
+        self.vmx_state.guest_state.rsi = guest_state.rsi;
+        self.vmx_state.guest_state.rdi = guest_state.rdi;
+        self.vmx_state.guest_state.r8 = guest_state.r8;
+        self.vmx_state.guest_state.r9 = guest_state.r9;
+        self.vmx_state.guest_state.r10 = guest_state.r10;
+        self.vmx_state.guest_state.r11 = guest_state.r11;
+        self.vmx_state.guest_state.r12 = guest_state.r12;
+        self.vmx_state.guest_state.r13 = guest_state.r13;
+        self.vmx_state.guest_state.r14 = guest_state.r14;
+        self.vmx_state.guest_state.r15 = guest_state.r15;
         Ok(())
     }
 
-    pub fn write_state(&mut self, rax: u64) -> RvmResult<()> {
-        // TODO: write other states
-        self.vmx_state.guest_state.rax = rax;
-        Ok(())
+    pub fn read_state(&self) -> RvmResult<RvmGuestState> {
+        Ok(RvmGuestState {
+            rax: self.vmx_state.guest_state.rax,
+            rcx: self.vmx_state.guest_state.rcx,
+            rdx: self.vmx_state.guest_state.rdx,
+            rbx: self.vmx_state.guest_state.rbx,
+            rbp: self.vmx_state.guest_state.rbp,
+            rsi: self.vmx_state.guest_state.rsi,
+            rdi: self.vmx_state.guest_state.rdi,
+            r8: self.vmx_state.guest_state.r8,
+            r9: self.vmx_state.guest_state.r9,
+            r10: self.vmx_state.guest_state.r10,
+            r11: self.vmx_state.guest_state.r11,
+            r12: self.vmx_state.guest_state.r12,
+            r13: self.vmx_state.guest_state.r13,
+            r14: self.vmx_state.guest_state.r14,
+            r15: self.vmx_state.guest_state.r15,
+        })
     }
 }
 

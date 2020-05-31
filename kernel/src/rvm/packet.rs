@@ -12,22 +12,13 @@ pub enum RvmExitPacketKind {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone)]
-pub union IoValue {
-    pub d_u8: u8,
-    pub d_u16: u16,
-    pub d_u32: u32,
-    pub buf: [u8; 4],
-}
-
-#[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct IoPacket {
     pub port: u16,
     pub access_size: u8,
     pub input: bool,
-    pub value_cnt: u8, // 多少个IoValue
-    pub values: [IoValue; 32],
+    pub string: bool,
+    pub repeat: bool,
 }
 
 #[repr(C)]
@@ -47,37 +38,6 @@ pub struct RvmExitPacket {
     kind: RvmExitPacketKind,
     key: u64,
     inner: RvmExitPacketInnner,
-}
-
-impl Default for IoValue {
-    fn default() -> Self {
-        Self { d_u32: 0 }
-    }
-}
-
-impl IoValue {
-    pub fn from_raw_parts(data: *const u8, access_size: u8) -> Self {
-        let mut buf: [u8; 4] = [0; 4];
-        unsafe {
-            buf[..access_size as usize]
-                .copy_from_slice(core::slice::from_raw_parts(data, access_size as usize))
-        }
-        Self { buf }
-    }
-}
-
-impl Debug for IoValue {
-    fn fmt(&self, f: &mut Formatter) -> Result {
-        write!(f, "IoValue {{ 0x{:08x} }}", unsafe { self.d_u32 })
-    }
-}
-
-impl Debug for IoPacket {
-    fn fmt(&self, f: &mut Formatter) -> Result {
-        write!(f, "IoPacket {{ port: 0x{:x}, access_size: 0x{:x}, input: {}, value_cnt: {}, values: [{:?}, ...], }}", 
-                self.port, self.access_size, self.input, self.value_cnt, self.values[0]
-            )
-    }
 }
 
 impl RvmExitPacket {
