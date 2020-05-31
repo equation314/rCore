@@ -226,3 +226,24 @@ skip_fxrstor1:
     # - load cs, ss
     # - load rflags <- r11
     # - load rip <- rcx
+
+# Call external interrupt handler manually without actually issuing interrupt
+.global manual_trap
+manual_trap:
+    pushf
+    pop r11                             # save rlags -> r11
+    mov r10, rsp                        # save rsp -> r10
+    lea rcx, [rip + manual_trap_ret]    # save return address -> rcx
+
+    push 0x10       # ss
+    push r10        # rsp
+    push r11        # rflags
+    push 0x8        # cs
+    push rcx        # rip
+    push 0          # error_code (dummy)
+    push rdi        # trap_num (arg)
+
+    jmp __alltraps
+
+manual_trap_ret:
+    ret

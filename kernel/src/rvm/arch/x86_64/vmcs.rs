@@ -470,7 +470,7 @@ bitflags! {
 
 bitflags! {
     /// This field provides details about the event to be injected.
-    struct InterruptionInfo: u32 {
+    pub struct InterruptionInfo: u32 {
         /// External interrupt
         const TYPE_EXTERNAL             = 0 << 8;
         /// Non-maskable interrupt (NMI)

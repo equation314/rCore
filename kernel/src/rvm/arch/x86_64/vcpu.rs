@@ -11,11 +11,12 @@ use x86_64::{
 use super::{
     msr::*,
     structs::{MsrList, VmxPage},
+    timer::PitTimer,
     vmcs::*,
     vmexit::vmexit_handler,
     Guest,
 };
-use crate::rvm::interrupt::{InterruptController, VirtualTimer};
+use crate::rvm::interrupt::InterruptController;
 use crate::rvm::{inode::RvmGuestState, packet::RvmExitPacket, RvmError, RvmResult};
 
 /// Holds the register state used to restore a host.
@@ -102,23 +103,24 @@ struct VmxState {
 
 /// Store the interruption state/virtual timer.
 #[derive(Debug)]
-struct InterruptState {
-    timer: VirtualTimer,
-    controller: InterruptController,
+pub struct InterruptState {
+    pub timer: PitTimer,
+    pub controller: InterruptController,
 }
 
 impl InterruptState {
     fn new() -> Self {
         Self {
-            timer: VirtualTimer::new(),
+            timer: PitTimer::new(),
             controller: InterruptController::new(u8::MAX as usize),
         }
     }
 
     /// Set timer IRQ pending if timeout.
     fn try_timer_irq(&mut self) {
-        if self.timer.enabled() && self.timer.tick(unsafe { crate::trap::TICK } as u64) {
-            self.controller.virtual_interrupt(self.timer.irq_num);
+        if self.timer.inner.enabled() && self.timer.inner.tick() {
+            self.controller
+                .virtual_interrupt(PitTimer::IRQ_NUM as usize);
         }
     }
 
@@ -584,6 +586,7 @@ impl Vcpu {
             match vmexit_handler(
                 &mut vmcs,
                 &mut self.vmx_state.guest_state,
+                &mut self.interrupt_state,
                 &self.guest.gpm,
                 &self.guest.traps,
             )? {
