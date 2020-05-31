@@ -73,7 +73,9 @@ impl VirtualTimer {
     }
 
     pub fn set_count(&mut self, count: usize) {
-        self.count = count;
+        if count > 0 {
+            self.count = count;
+        }
     }
 
     pub fn tick(&mut self) -> bool {
