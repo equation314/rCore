@@ -7,6 +7,7 @@ mod guest;
 mod guest_phys_memory_set;
 mod msr;
 mod structs;
+mod timer;
 mod vcpu;
 mod vmcs;
 mod vmexit;

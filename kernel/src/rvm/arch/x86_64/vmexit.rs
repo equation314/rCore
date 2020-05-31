@@ -7,7 +7,8 @@ use spin::RwLock;
 use super::exit_reason::ExitReason;
 use super::feature::*;
 use super::guest_phys_memory_set::GuestPhysicalMemorySet;
-use super::{vcpu::GuestState, vmcs::*};
+use super::vcpu::{GuestState, InterruptState};
+use super::vmcs::*;
 use crate::rvm::packet::*;
 use crate::rvm::trap_map::{TrapKind, TrapMap};
 use crate::rvm::{RvmError, RvmResult};
@@ -40,7 +41,7 @@ struct ExitInfo {
 }
 
 impl ExitInfo {
-    fn new(vmcs: &AutoVmcs) -> Self {
+    fn from(vmcs: &AutoVmcs) -> Self {
         let full_reason = vmcs.read32(VmcsField32::VM_EXIT_REASON);
         Self {
             exit_reason: full_reason.get_bits(0..16).into(),
@@ -56,6 +57,24 @@ impl ExitInfo {
             VmcsFieldXX::GUEST_RIP,
             self.guest_rip + self.exit_instruction_length as usize,
         )
+    }
+}
+
+#[derive(Debug)]
+struct ExitInterruptionInfo {
+    vector: u8,
+    interruption_type: u8,
+    valid: bool,
+}
+
+impl ExitInterruptionInfo {
+    fn from(vmcs: &AutoVmcs) -> Self {
+        let info = vmcs.read32(VmcsField32::VM_EXIT_INTR_INFO);
+        Self {
+            vector: info.get_bits(0..8) as u8,
+            interruption_type: info.get_bits(8..11) as u8,
+            valid: info.get_bit(31),
+        }
     }
 }
 
@@ -81,11 +100,14 @@ impl IoInfo {
 }
 
 fn handle_external_interrupt(vmcs: &AutoVmcs) -> ExitResult {
-    warn!(
-        "[RVM] VM exit: Unhandled external interrupt {:#x?}",
-        vmcs.read32(VmcsField32::VM_EXIT_INTR_INFO)
-    );
-    // TODO: construct `TrapFrame` and call `arch::interrupt::handler::rust_trap()`
+    let info = ExitInterruptionInfo::from(vmcs);
+    trace!("[RVM] VM exit: External interrupt {:#x?}", info);
+    debug_assert!(info.valid);
+    debug_assert!(info.interruption_type == 0);
+    extern "C" {
+        fn manual_trap(vector: usize);
+    }
+    unsafe { manual_trap(info.vector as usize) };
     Ok(None)
 }
 
@@ -302,6 +324,7 @@ fn handle_io_instruction(
     exit_info: &ExitInfo,
     vmcs: &mut AutoVmcs,
     guest_state: &mut GuestState,
+    interrupt_state: &mut InterruptState,
     traps: &RwLock<TrapMap>,
 ) -> ExitResult {
     let io_info = IoInfo::from(exit_info.exit_qualification);
@@ -315,10 +338,24 @@ fn handle_io_instruction(
     );
 
     exit_info.next_rip(vmcs);
-    if io_info.port == 0x402 {
+    match io_info.port {
         // QEMU debug port
-        print!("{}", guest_state.rax as u8 as char);
-        return Ok(None);
+        0x402 => {
+            if !io_info.input {
+                print!("{}", guest_state.rax as u8 as char);
+            }
+            return Ok(None);
+        }
+        // i8253 PIT
+        0x40 => {
+            if io_info.input {
+                guest_state.rax = interrupt_state.timer.read() as u64;
+            } else {
+                interrupt_state.timer.write(guest_state.rax as u8);
+            }
+            return Ok(None);
+        }
+        _ => {}
     }
 
     let trap = match traps.read().find(TrapKind::Io, io_info.port as usize) {
@@ -411,10 +448,11 @@ fn handle_ept_violation(
 pub fn vmexit_handler(
     vmcs: &mut AutoVmcs,
     guest_state: &mut GuestState,
+    interrupt_state: &mut InterruptState,
     gpm: &Arc<RwLock<GuestPhysicalMemorySet>>,
     traps: &RwLock<TrapMap>,
 ) -> ExitResult {
-    let exit_info = ExitInfo::new(vmcs);
+    let exit_info = ExitInfo::from(vmcs);
     trace!(
         "[RVM] VM exit: {:#x?} @ CPU{}",
         exit_info,
@@ -426,7 +464,9 @@ pub fn vmexit_handler(
         ExitReason::INTERRUPT_WINDOW => handle_interrupt_window(vmcs),
         ExitReason::CPUID => handle_cpuid(&exit_info, vmcs, guest_state),
         ExitReason::VMCALL => handle_vmcall(&exit_info, vmcs, guest_state),
-        ExitReason::IO_INSTRUCTION => handle_io_instruction(&exit_info, vmcs, guest_state, traps),
+        ExitReason::IO_INSTRUCTION => {
+            handle_io_instruction(&exit_info, vmcs, guest_state, interrupt_state, traps)
+        }
         ExitReason::EPT_VIOLATION => handle_ept_violation(&exit_info, vmcs, gpm, traps),
         _ => Err(RvmError::NotSupported),
     };
